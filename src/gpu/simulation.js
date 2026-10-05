@@ -1,10 +1,12 @@
 // Particle Life の GPU 版: バッファ + コンピュートパイプライン + step の encode。DOM には触れない。
 //
 // 1 ステップのパス (すべて同じ compute pass 内、dispatch 間はストレージの書き込みが自動で同期される):
-//   clearCells -> countCells -> prefixSum -> scatter -> force
+//   countCells -> prefixSum (+ セル個数のクリア) -> scatter -> force
 //
-//   バッファ A : 「現在の状態」 (x, y, vx, vy, type, id)。ステップの入力かつ出力。描画も A を読む。
+//   バッファ A : 「現在の状態」 (x, y, vx, vy, type, id, density)。ステップの入力かつ出力。描画も A を読む。
 //   バッファ B : scatter でセル順に並べ替えた作業コピー。force が読む (近傍が連続メモリになる)。
+//                近傍ループが 1 回の 16 バイト読み込みで済むよう (x, y, type, pressure) と
+//                (vx, vy, id) に詰め替えてある。
 //   force は B を読んで A に書く (近傍の位置を読み続けるので in-place は不可)。
 //   A も B も同じ「セル順」の並びになる。id (= meta.y) で元の index を追える。
 //
@@ -15,7 +17,7 @@ import { createShaderModule, withErrorScope } from './device.js';
 import { PARAMS_FLOATS, PARAMS_STRUCT_FIELDS, assertParamsLayout } from './shaders/common.wgsl.js';
 import {
     PARTICLE_WORKGROUP,
-    clearCellsWGSL, countCellsWGSL, prefixSumWGSL, scatterWGSL, wrapAllWGSL,
+    countCellsWGSL, prefixSumWGSL, scatterWGSL, wrapAllWGSL,
 } from './shaders/grid.wgsl.js';
 import { FORCE_WORKGROUP, forceWGSL } from './shaders/force.wgsl.js';
 import { alloc, randomize as randomizeState } from '../particles.js';
@@ -49,7 +51,7 @@ export class GpuSimulation {
         this.world = { width: 1, height: 1 };
 
         // セルグリッド (configureGrid が決める)
-        this.grid = { rMax: NaN, width: NaN, height: NaN, nx: 3, ny: 3, nCells: 9, capacity: 0 };
+        this.grid = { rMax: NaN, reachWanted: 0, width: NaN, height: NaN, nx: 3, ny: 3, nCells: 9, reach: 1, capacity: 0 };
 
         this.uniformData = new ArrayBuffer(PARAMS_FLOATS * 4);
         this.uf32 = new Float32Array(this.uniformData);
@@ -81,7 +83,6 @@ export class GpuSimulation {
         };
         await withErrorScope(device, 'sim pipelines', async () => {
             this.pipelines = {
-                clear: await make('clearCells', clearCellsWGSL),
                 count: await make('countCells', countCellsWGSL),
                 scan: await make('prefixSum', prefixSumWGSL),
                 scatter: await make('scatter', scatterWGSL),
@@ -104,8 +105,9 @@ export class GpuSimulation {
         this.buffers = {
             posVelA: mk('posVel A', m * 16),   // vec4f (x, y, vx, vy)
             metaA: mk('meta A', m * 8),        // vec2<u32> (type, id)
-            posVelB: mk('posVel B (cell-sorted)', m * 16),
-            metaB: mk('meta B (cell-sorted)', m * 8),
+            densityA: mk('density A', m * 4),  // f32 (前ステップの重み付き近傍数。圧力の計算用)
+            posTypeB: mk('posType B (cell-sorted)', m * 16),  // vec4f (x, y, type, pressure)
+            velIdB: mk('velId B (cell-sorted)', m * 16),      // vec4f (vx, vy, id, 0)
             slot: mk('particleSlot', m * 8),   // vec2<u32> (cell, セル内通し番号)
         };
         this.rebuildBindGroups();
@@ -149,16 +151,15 @@ export class GpuSimulation {
             layout: pipelines[name].getBindGroupLayout(0),
             entries: [U, ...entries.map((buffer, i) => ({ binding: i + 1, resource: { buffer } }))],
         });
-        const { posVelA, metaA, posVelB, metaB, slot } = buffers;
+        const { posVelA, metaA, densityA, posTypeB, velIdB, slot } = buffers;
         this.bindGroups.wrap = bg('wrap', [posVelA]);
         if (!cellBuffers) return;
         const { numCellParticles, firstCellParticle } = cellBuffers;
-        this.bindGroups.clear = bg('clear', [numCellParticles]);
         this.bindGroups.count = bg('count', [posVelA, numCellParticles, slot]);
         this.bindGroups.scan = bg('scan', [numCellParticles, firstCellParticle]);
-        this.bindGroups.scatter = bg('scatter', [posVelA, metaA, slot, firstCellParticle, posVelB, metaB]);
+        this.bindGroups.scatter = bg('scatter', [posVelA, metaA, densityA, slot, firstCellParticle, posTypeB, velIdB]);
         if (rulesBuffer) {
-            this.bindGroups.force = bg('force', [posVelB, metaB, firstCellParticle, rulesBuffer, posVelA, metaA]);
+            this.bindGroups.force = bg('force', [posTypeB, velIdB, firstCellParticle, rulesBuffer, posVelA, metaA, densityA]);
         }
     }
 
@@ -185,6 +186,7 @@ export class GpuSimulation {
         if (n > 0) {
             queue.writeBuffer(this.buffers.posVelA, 0, pv);
             queue.writeBuffer(this.buffers.metaA, 0, meta);
+            queue.writeBuffer(this.buffers.densityA, 0, new Float32Array(n)); // 圧力なしから始める
         }
     }
 
@@ -285,17 +287,27 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     }
 
     /**
-     * セル数を決める (CPU 版 Grid.configure と同じ: 1 軸あたり max(3, floor(サイズ / rMax)))。
-     * 3 セル以上あれば周期境界で回り込む 3x3 は重複せず、セルサイズ >= rMax なので
-     * rMax 以内の相手は必ず 3x3 に入る。
+     * セル数を決める。セル幅 >= rMax / K (K = reach) にして、force は ±K セルを走査する。
+     * K = 1 は CPU 版 Grid.configure と同じ (1 軸あたり floor(サイズ / rMax) セル)。
+     * ±K セルが周期境界で回り込んでも重複しないよう、各軸 2K + 1 セル以上を必要とし、
+     * 足りなければ K を下げる (K = 1 でも足りなければ従来どおり 3 セルに切り上げる)。
      */
-    configureGrid(rMax) {
+    configureGrid(rMax, reachWanted = 1) {
         const g = this.grid;
         const { width, height } = this.world;
-        if (g.rMax === rMax && g.width === width && g.height === height && this.cellBuffers) return;
+        if (g.rMax === rMax && g.reachWanted === reachWanted && g.width === width && g.height === height
+            && this.cellBuffers) return;
 
-        let r = Math.max(rMax, 1e-4);
-        let nx, ny;
+        let reach = Math.max(1, Math.min(4, Math.round(reachWanted) || 1));
+        let r, nx, ny;
+        for (;;) {
+            r = Math.max(rMax, 1e-4) / reach;
+            nx = Math.floor(width / r);
+            ny = Math.floor(height / r);
+            const fits = nx >= 2 * reach + 1 && ny >= 2 * reach + 1;
+            if (reach > 1 && (!fits || nx * ny > MAX_CELLS)) { reach--; continue; }
+            break;
+        }
         for (;;) {
             nx = Math.max(3, Math.floor(width / r));
             ny = Math.max(3, Math.floor(height / r));
@@ -303,8 +315,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
             r *= 1.25; // 上限を超えるときだけセルを大きくする (正確さは保たれ、遅くなるだけ)
         }
         g.rMax = rMax;
+        g.reachWanted = reachWanted;
         g.width = width;
         g.height = height;
+        g.reach = reach;
         g.nx = nx;
         g.ny = ny;
         g.nCells = nx * ny;
@@ -354,6 +368,12 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         // forceFactor を掛けて、粒子間の力に対してポインタが弱くならないようにする (CPU 版と同じ)
         f[FIELD.pointerStrength] = usePointer ? pointer.mode * params.pointerStrength * params.forceFactor : 0;
 
+        f[FIELD.rMax] = rMax;
+        u[FIELD.reach] = g.reach;
+        f[FIELD.maxSpeed] = params.limitSpeed ? Math.max(params.maxSpeed, 0) : 0;
+        f[FIELD.restDensity] = params.restDensity;
+        f[FIELD.pressureScale] = params.limitPressure ? 0.5 * Math.max(params.pressureStrength, 0) : 0;
+
         this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData);
     }
 
@@ -366,7 +386,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
      */
     encode(encoder, { params, pointer, steps, dt = params.dt, timestampWrites }) {
         if (!this.buffers || !this.rulesBuffer) throw new Error('GpuSimulation: setRules / setCount first');
-        this.configureGrid(params.rMax);
+        this.configureGrid(params.rMax, params.cellsPerRMax);
         this.writeUniforms(params, pointer, dt);
         const pass = encoder.beginComputePass({ label: 'simulation', timestampWrites });
         if (this.count > 0) {
@@ -377,26 +397,21 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
     encodeStep(pass) {
         const { pipelines, bindGroups, count } = this;
-        const { nCells } = this.grid;
         const particleGroups = ceilDiv(count, PARTICLE_WORKGROUP);
 
-        // 1. セルごとの個数を 0 に
-        pass.setPipeline(pipelines.clear);
-        pass.setBindGroup(0, bindGroups.clear);
-        pass.dispatchWorkgroups(ceilDiv(nCells, PARTICLE_WORKGROUP));
-        // 2. 個数を数える (+ セル内通し番号を保存)
+        // 1. 個数を数える (+ セル内通し番号を保存)。個数は前ステップの scan が 0 に戻してある
         pass.setPipeline(pipelines.count);
         pass.setBindGroup(0, bindGroups.count);
         pass.dispatchWorkgroups(particleGroups);
-        // 3. 累積和 -> firstCellParticle
+        // 2. 累積和 -> firstCellParticle (+ 個数を 0 に戻す)
         pass.setPipeline(pipelines.scan);
         pass.setBindGroup(0, bindGroups.scan);
         pass.dispatchWorkgroups(1);
-        // 4. セル順に並べ替え (A -> B)
+        // 3. セル順に並べ替え (A -> B)
         pass.setPipeline(pipelines.scatter);
         pass.setBindGroup(0, bindGroups.scatter);
         pass.dispatchWorkgroups(particleGroups);
-        // 5. 力の計算 + 積分 (B -> A)
+        // 4. 力の計算 + 積分 (B -> A)
         pass.setPipeline(pipelines.force);
         pass.setBindGroup(0, bindGroups.force);
         pass.dispatchWorkgroups(ceilDiv(count, FORCE_WORKGROUP));
@@ -407,21 +422,23 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     /**
      * 現在の状態 (バッファ A) を CPU に読み戻す。通常のフレームループでは使わない。
      * @returns {Promise<{count:number, x:Float32Array, y:Float32Array, vx:Float32Array, vy:Float32Array,
-     *                    type:Uint32Array, id:Uint32Array}>}
+     *                    type:Uint32Array, id:Uint32Array, density:Float32Array}>}
      */
     async readState() {
         const { device, count } = this;
         const n = count;
         const pvBytes = n * 16;
         const metaBytes = n * 8;
+        const densBytes = n * 4;
         const staging = device.createBuffer({
-            size: Math.max(16, pvBytes + metaBytes),
+            size: Math.max(16, pvBytes + metaBytes + densBytes),
             usage: GPUBufferUsage.MAP_READ | COPY_DST,
         });
         const enc = device.createCommandEncoder();
         if (n > 0) {
             enc.copyBufferToBuffer(this.buffers.posVelA, 0, staging, 0, pvBytes);
             enc.copyBufferToBuffer(this.buffers.metaA, 0, staging, pvBytes, metaBytes);
+            enc.copyBufferToBuffer(this.buffers.densityA, 0, staging, pvBytes + metaBytes, densBytes);
         }
         device.queue.submit([enc.finish()]);
         await staging.mapAsync(GPUMapMode.READ);
@@ -431,11 +448,13 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
         const pv = new Float32Array(raw, 0, n * 4);
         const meta = new Uint32Array(raw, pvBytes, n * 2);
+        const density = new Float32Array(raw, pvBytes + metaBytes, n);
         const out = {
             count: n,
             x: new Float32Array(n), y: new Float32Array(n),
             vx: new Float32Array(n), vy: new Float32Array(n),
             type: new Uint32Array(n), id: new Uint32Array(n),
+            density: density.slice(),
         };
         for (let i = 0; i < n; i++) {
             out.x[i] = pv[4 * i];
