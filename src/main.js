@@ -74,6 +74,10 @@ async function main() {
         trails: params.trails,
         pointer,
         pointerRadius: params.pointerRadius,
+        rMax: params.rMax,
+        maxSpeed: params.maxSpeed,
+        restDensity: params.restDensity,
+        organic: params, // renderMode / fieldScale / splatRadius ... (config.js の Organic 項目)
     };
 
     const actions = {
@@ -128,6 +132,9 @@ async function main() {
         view.particleRadius = params.particleRadius;
         view.trails = params.trails;
         view.pointerRadius = params.pointerRadius;
+        view.rMax = params.rMax;
+        view.maxSpeed = params.maxSpeed;
+        view.restDensity = params.restDensity;
 
         const encoder = device.createCommandEncoder({ label: 'frame' });
         sim.encode(encoder, {

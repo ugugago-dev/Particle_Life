@@ -10,7 +10,7 @@ export const MAX_PALETTE = 16;
 // RenderParams = 48 バイト = 12 個の f32 (vec2f は 8 バイト境界: offset 0, 8, 32 に置いてある)
 export const RENDER_UNIFORM_FLOATS = 12;
 
-const RENDER_COMMON = /* wgsl */`
+export const RENDER_COMMON = /* wgsl */`
 struct RenderParams {
   worldSize: vec2f,     // (worldW, worldH)
   canvasSize: vec2f,    // バックバッファの px
@@ -20,7 +20,7 @@ struct RenderParams {
   fade: f32,            // トレイルの BG 混合率
   pointerPos: vec2f,    // ワールド座標
   pointerMode: f32,     // +1 引力 / -1 斥力
-  pad0: f32,
+  particleAlpha: f32,   // パーティクルの不透明度 (dots: 1 / organic の重ね描き: 0.3)
 };
 
 @group(0) @binding(0) var<uniform> R: RenderParams;
@@ -69,7 +69,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut
 fn fs(in: VSOut) -> @location(0) vec4f {
   let d = length(in.offsetPx);
   let a = clamp(R.radiusPx + 0.5 - d, 0.0, 1.0);        // 縁 1px の線形カバレッジ
-  return vec4f(in.color, a);
+  return vec4f(in.color, a * R.particleAlpha);
 }
 `;
 

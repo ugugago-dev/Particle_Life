@@ -37,6 +37,17 @@ export const defaults = Object.freeze({
     particleRadius: 1.5,     // CSS px
     trails: false,
     showMatrix: true,
+
+    // organic rendering (screen-space metaballs; see docs/organic-rendering-spec.md)
+    renderMode: 'organic',   // 'dots' | 'organic'
+    fieldScale: 0.5,         // field texture resolution relative to the canvas
+    splatRadius: 0.7,        // x rMax
+    threshold: 0.5,          // membrane threshold on the accumulated field
+    edge: 0.08,              // softness of the membrane edge
+    coreBoost: 1.5,          // field weight of densely packed particles (dark nucleus)
+    stretch: 0.5,            // elongation along the velocity
+    rimStrength: 0.8,
+    showParticles: false,    // overlay the dots (faint) on top of the organic look
 });
 
 /** Fresh mutable copy of the defaults (the live params object). */

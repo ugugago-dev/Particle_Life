@@ -49,6 +49,17 @@ export function createGUI(params, actions) {
     display.add(params, 'trails');
     display.add(params, 'showMatrix').name('Show matrix').onChange(actions.setMatrixVisible);
 
+    const organic = display.addFolder('Organic');
+    organic.add(params, 'renderMode', ['dots', 'organic']);
+    organic.add(params, 'fieldScale', [0.25, 0.5, 1]);
+    organic.add(params, 'splatRadius', 0.2, 1.5, 0.01).name('splatRadius (x rMax)');
+    organic.add(params, 'threshold', 0.05, 2, 0.01);
+    organic.add(params, 'edge', 0.01, 0.3, 0.005);
+    organic.add(params, 'coreBoost', 1, 4, 0.05);
+    organic.add(params, 'stretch', 0, 2, 0.05);
+    organic.add(params, 'rimStrength', 0, 2, 0.05);
+    organic.add(params, 'showParticles');
+
     const buttons = gui.addFolder('Actions');
     buttons.add({ run: actions.randomizeRules }, 'run').name('Randomize rules');
     buttons.add({ run: actions.resetParticles }, 'run').name('Reset particles');
