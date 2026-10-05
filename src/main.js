@@ -141,6 +141,7 @@ async function main() {
             params,
             pointer,
             steps: params.running ? params.substeps : 0,
+            needDensity: params.renderMode === 'organic',   // organic の splat が density を読む
             timestampWrites: timer.simWrites(),
         });
         renderer.draw(encoder, sim, view, timer);

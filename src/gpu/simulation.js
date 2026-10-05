@@ -7,7 +7,8 @@
 //   バッファ B : scatter でセル順に並べ替えた作業コピー。force が読む (近傍が連続メモリになる)。
 //                近傍ループが 1 回の 16 バイト読み込みで済むよう (x, y, type, pressure) と
 //                (vx, vy, id) に詰め替えてある。pressure は density パスが書く
-//                (圧縮の制限が無効なら density パス自体を省く)。速度は viscosity > 0 のときだけ読む。
+//                (圧縮の制限が無効でも、描画が density を要るとき (needDensity) は density パスを走らせる。
+//                その場合 force は圧力を読まない variant なので物理は変わらない)。速度は viscosity > 0 のときだけ読む。
 //   force は B を読んで A に書く (近傍の位置を読み続けるので in-place は不可)。
 //   A も B も同じ「セル順」の並びになる。id (= meta.y) で元の index を追える。
 //
@@ -395,14 +396,17 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     /**
      * 1 フレーム分のシミュレーションを encoder に積む (CPU 読み戻しなし)。
      * @param {GPUCommandEncoder} encoder
-     * @param {{params: object, pointer?: object, steps: number, dt?: number,
+     * @param {{params: object, pointer?: object, steps: number, dt?: number, needDensity?: boolean,
      *          timestampWrites?: GPUComputePassTimestampWrites}} opts
+     *   needDensity: 描画 (organic) が densityA を読むとき true。圧縮の制限が無効でも density パスを走らせる
+     *                (force の variant は圧力だけで決まるので、物理は変わらない)。
      *   steps 回の substep を 1 つの compute pass にまとめる。steps = 0 でも (計測用に) 空の pass を作る。
      */
-    encode(encoder, { params, pointer, steps, dt = params.dt, timestampWrites }) {
+    encode(encoder, { params, pointer, steps, dt = params.dt, needDensity = false, timestampWrites }) {
         if (!this.buffers || !this.rulesBuffer) throw new Error('GpuSimulation: setRules / setCount first');
         this.configureGrid(params.rMax, params.cellsPerRMax);
         this.pressureOn = !!params.limitPressure && params.pressureStrength > 0;
+        this.densityOn = this.pressureOn || !!needDensity;   // density パスの要否 (force の variant は pressureOn だけで決める)
         this.writeUniforms(params, pointer, dt);
         const pass = encoder.beginComputePass({ label: 'simulation', timestampWrites });
         if (this.count > 0) {
@@ -427,8 +431,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         pass.setPipeline(pipelines.scatter);
         pass.setBindGroup(0, bindGroups.scatter);
         pass.dispatchWorkgroups(particleGroups);
-        // 4. 密度 -> 圧力 (圧縮の制限が有効なときだけ。力と同じ位置から作るので 1 ステップ遅れない)
-        if (this.pressureOn) {
+        // 4. 密度 -> 圧力 (圧縮の制限が有効か、描画が density を要るときだけ。力と同じ位置から作るので 1 ステップ遅れない)
+        if (this.densityOn) {
             pass.setPipeline(pipelines.density);
             pass.setBindGroup(0, bindGroups.density);
             pass.dispatchWorkgroups(ceilDiv(count, FORCE_WORKGROUP));
@@ -446,7 +450,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
      * 現在の状態 (バッファ A) を CPU に読み戻す。通常のフレームループでは使わない。
      * @returns {Promise<{count:number, x:Float32Array, y:Float32Array, vx:Float32Array, vy:Float32Array,
      *                    type:Uint32Array, id:Uint32Array, density:Float32Array}>}
-     *   density は圧縮の制限が有効なときだけ更新される (無効なら 0 のまま)。
+     *   density は density パスが走ったとき (圧縮の制限が有効、または encode の needDensity) だけ更新される (それ以外は 0 / 古いまま)。
      */
     async readState() {
         const { device, count } = this;
