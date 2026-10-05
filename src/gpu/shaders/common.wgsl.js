@@ -2,7 +2,7 @@
 //
 // Params は f32 / u32 のスカラーだけで構成する (vec を使わない) ので、
 // WGSL の uniform アライメント規則 (vec2=8, vec4=16 バイト境界) を気にしなくてよい。
-// 全体で 24 個 = 96 バイト (16 の倍数)。JS 側 (simulation.js の writeUniforms) と
+// 全体で 28 個 = 112 バイト (16 の倍数)。JS 側 (simulation.js の writeUniforms) と
 // フィールド順を必ず一致させること。
 //
 // 座標系: ワールドは [0, worldW) x [0, worldH) のトーラス (worldH = 1)。
@@ -11,9 +11,10 @@
 export const PARAMS_STRUCT_FIELDS = [
     'dt', 'rMax2', 'invRMax', 'beta', 'invBeta', 'invOneMinusBeta', 'accelScale', 'friction',
     'worldW', 'worldH', 'invCellW', 'invCellH', 'nx', 'ny', 'nCells', 'numParticles',
-    'numTypes', 'pointerActive', 'pointerX', 'pointerY', 'pointerR2', 'invPointerR', 'pointerStrength', 'pad0',
+    'numTypes', 'pointerActive', 'pointerX', 'pointerY', 'pointerR2', 'invPointerR', 'pointerStrength', 'rMax',
+    'reach', 'maxSpeed', 'restDensity', 'pressureScale',
 ];
-export const PARAMS_FLOATS = PARAMS_STRUCT_FIELDS.length; // 24
+export const PARAMS_FLOATS = PARAMS_STRUCT_FIELDS.length; // 28
 
 export const COMMON_WGSL = /* wgsl */`
 struct Params {
@@ -40,7 +41,11 @@ struct Params {
   pointerR2: f32,
   invPointerR: f32,
   pointerStrength: f32,   // mode * pointerStrength * forceFactor (0 when inactive)
-  pad0: f32,
+  rMax: f32,
+  reach: u32,             // 近傍探索のセル数 K (セル幅 >= rMax / K、探索は ±K セル)
+  maxSpeed: f32,          // 速度の上限 (ワールド単位 / 秒)。0 = 無制限
+  restDensity: f32,       // これを超えた密度の分だけ圧力がかかる
+  pressureScale: f32,     // 0.5 * pressureStrength (0 = 圧力なし)
 };
 
 @group(0) @binding(0) var<uniform> P: Params;

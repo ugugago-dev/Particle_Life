@@ -143,7 +143,7 @@ async function main() {
         stats.recordCpu(performance.now() - t0);
 
         const g = sim.grid;
-        stats.tick(now, sim.count, `cells     ${g.nx}x${g.ny}`);
+        stats.tick(now, sim.count, `cells     ${g.nx}x${g.ny} (±${g.reach})`);
     }
     requestAnimationFrame(frame);
 }

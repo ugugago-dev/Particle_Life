@@ -25,6 +25,14 @@ export function createGUI(params, actions) {
     sim.add(params, 'frictionHalfLife', 0.005, 0.3, 0.005);
     sim.add(params, 'dt', 0.001, 0.03, 0.001);
     sim.add(params, 'substeps', 1, 10, 1);
+    sim.add(params, 'cellsPerRMax', 1, 3, 1).name('cells / rMax');
+
+    const limits = gui.addFolder('Limits');
+    limits.add(params, 'limitSpeed').name('limit speed');
+    limits.add(params, 'maxSpeed', 0.02, 2, 0.01);
+    limits.add(params, 'limitPressure').name('limit compression');
+    limits.add(params, 'restDensity', 0, 40, 0.5);
+    limits.add(params, 'pressureStrength', 0, 2, 0.01);
 
     const world = gui.addFolder('Particles');
     // Re-initialise on release so dragging the slider does not rebuild every frame.

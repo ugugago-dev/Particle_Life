@@ -13,10 +13,20 @@ export const defaults = Object.freeze({
     forceFactor: 10,
     frictionHalfLife: 0.04,  // seconds for velocity to halve
 
+    // limits for structures (clusters) made of particles
+    limitSpeed: true,
+    maxSpeed: 0.3,           // world units / second (world height = 1)
+    limitPressure: true,
+    restDensity: 20,         // weighted neighbour count sum (1 - r/rMax)^2 above which pressure pushes back
+    pressureStrength: 0.15,  // pressure force relative to the rule forces (0 = off)
+
     // time stepping
     dt: 0.01,                // fixed step per substep
     substeps: 1,             // steps per rendered frame
     running: true,
+
+    // performance
+    cellsPerRMax: 2,         // grid cells per rMax (1 = classic 3x3 search; 2 scans ~40% fewer pairs)
 
     // pointer interaction
     pointerRadius: 0.15,
