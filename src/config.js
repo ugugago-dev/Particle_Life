@@ -19,6 +19,7 @@ export const defaults = Object.freeze({
     limitPressure: true,
     restDensity: 20,         // weighted neighbour count sum (1 - r/rMax)^2 above which pressure pushes back
     pressureStrength: 0.15,  // pressure force relative to the rule forces (0 = off)
+    viscosity: 0,            // extra damping of the relative velocity between compressed neighbours (0 = off; costs a velocity read)
 
     // time stepping
     dt: 0.01,                // fixed step per substep

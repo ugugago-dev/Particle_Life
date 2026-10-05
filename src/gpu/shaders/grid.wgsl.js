@@ -88,11 +88,10 @@ fn main(@builtin(local_invocation_index) lid: u32) {
 export const scatterWGSL = COMMON_WGSL + /* wgsl */`
 @group(0) @binding(1) var<storage, read> srcPosVel: array<vec4f>;
 @group(0) @binding(2) var<storage, read> srcMeta: array<vec2u>;
-@group(0) @binding(3) var<storage, read> srcDensity: array<f32>;
-@group(0) @binding(4) var<storage, read> particleSlot: array<vec2u>;
-@group(0) @binding(5) var<storage, read> firstCellParticle: array<u32>;
-@group(0) @binding(6) var<storage, read_write> sortedPosType: array<vec4f>;   // (x, y, f32(type), pressure)
-@group(0) @binding(7) var<storage, read_write> sortedVelId: array<vec4f>;     // (vx, vy, f32(id), 0)
+@group(0) @binding(3) var<storage, read> particleSlot: array<vec2u>;
+@group(0) @binding(4) var<storage, read> firstCellParticle: array<u32>;
+@group(0) @binding(5) var<storage, read_write> sortedPosType: array<vec4f>;   // (x, y, f32(type), pressure: density パスが書く)
+@group(0) @binding(6) var<storage, read_write> sortedVelId: array<vec4f>;     // (vx, vy, f32(id), 0)
 
 @compute @workgroup_size(${PARTICLE_WORKGROUP})
 fn main(@builtin(global_invocation_id) gid: vec3u) {
@@ -102,8 +101,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let dst = firstCellParticle[s.x] + s.y;
   let pv = srcPosVel[i];
   let m = srcMeta[i];
-  let pressure = max(0.0, srcDensity[i] - P.restDensity);
-  sortedPosType[dst] = vec4f(pv.xy, f32(m.x), pressure);
+  sortedPosType[dst] = vec4f(pv.xy, f32(m.x), 0.0);
   sortedVelId[dst] = vec4f(pv.zw, f32(m.y), 0.0);
 }
 `;

@@ -33,6 +33,7 @@ export function createGUI(params, actions) {
     limits.add(params, 'limitPressure').name('limit compression');
     limits.add(params, 'restDensity', 0, 40, 0.5);
     limits.add(params, 'pressureStrength', 0, 2, 0.01);
+    limits.add(params, 'viscosity', 0, 5, 0.1);
 
     const world = gui.addFolder('Particles');
     // Re-initialise on release so dragging the slider does not rebuild every frame.
