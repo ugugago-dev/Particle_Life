@@ -4,7 +4,7 @@
 
 export const defaults = Object.freeze({
     // particles / rules
-    numParticles: 30000,     // GPU version (the CPU version used 3000)
+    numParticles: 60000,     // GPU version (the CPU version used 3000)
     numTypes: 6,
 
     // force model
@@ -18,7 +18,7 @@ export const defaults = Object.freeze({
     maxSpeed: 0.3,           // world units / second (world height = 1)
     limitPressure: true,
     restDensity: 20,         // weighted neighbour count sum (1 - r/rMax)^2 above which pressure pushes back
-    pressureStrength: 0.15,  // pressure force relative to the rule forces (0 = off)
+    pressureStrength: 0.005,  // pressure force relative to the rule forces (0 = off)
 
     // time stepping
     dt: 0.01,                // fixed step per substep
@@ -33,7 +33,7 @@ export const defaults = Object.freeze({
     pointerStrength: 5,      // peak accel = pointerStrength * forceFactor (stays strong vs particle forces)
 
     // display
-    particleRadius: 1.5,     // CSS px
+    particleRadius: 0.2,     // CSS px
     trails: false,
     showMatrix: true,
 });
