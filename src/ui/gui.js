@@ -33,6 +33,7 @@ export function createGUI(params, actions) {
     limits.add(params, 'limitPressure').name('limit compression');
     limits.add(params, 'restDensity', 0, 40, 0.5);
     limits.add(params, 'pressureStrength', 0, 2, 0.01);
+    limits.add(params, 'viscosity', 0, 5, 0.1);
 
     const world = gui.addFolder('Particles');
     // Re-initialise on release so dragging the slider does not rebuild every frame.
@@ -47,6 +48,17 @@ export function createGUI(params, actions) {
     display.add(params, 'particleRadius', 0.5, 6, 0.1).name('particleRadius (px)');
     display.add(params, 'trails');
     display.add(params, 'showMatrix').name('Show matrix').onChange(actions.setMatrixVisible);
+
+    const organic = display.addFolder('Organic');
+    organic.add(params, 'renderMode', ['dots', 'organic']);
+    organic.add(params, 'fieldScale', [0.25, 0.5, 1]);
+    organic.add(params, 'splatRadius', 0.2, 1.5, 0.01).name('splatRadius (x rMax)');
+    organic.add(params, 'threshold', 0.05, 2, 0.01);
+    organic.add(params, 'edge', 0.01, 0.3, 0.005);
+    organic.add(params, 'coreBoost', 1, 4, 0.05);
+    organic.add(params, 'stretch', 0, 2, 0.05);
+    organic.add(params, 'rimStrength', 0, 2, 0.05);
+    organic.add(params, 'showParticles');
 
     const buttons = gui.addFolder('Actions');
     buttons.add({ run: actions.randomizeRules }, 'run').name('Randomize rules');

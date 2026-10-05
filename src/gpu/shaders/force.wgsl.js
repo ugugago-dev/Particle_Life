@@ -7,10 +7,13 @@
 //   r < 1    : f = a * (1 - |2r - 1 - beta| / (1 - beta))    (a = rules[typeI][typeJ])
 //   それ以外  : f = 0
 // 圧縮の制限 (SPH 風の圧力。pressureStrength = 0 なら無効):
-//   density_i = sum_j (1 - r)^2                              (重み付きの近傍数)
-//   pressure  = max(0, density - restDensity)                (前ステップの密度から scatter が計算)
+//   density_i = sum_j (1 - r)^2                              (重み付きの近傍数。density パスが先に計算)
+//   pressure  = max(0, density - restDensity)                (同じステップの位置から。1 ステップ遅れない)
 //   f -= 0.5 * pressureStrength * (pressure_i + pressure_j) * (1 - r)     (i, j で対称な斥力)
+//   f += viscosity * (1 - r) * min(1, p_i + p_j) * ((v_j - v_i) . n)     (圧力がかかるペアの法線方向の相対速度を減衰 = 人工粘性)
 //   accel_i  = rMax * forceFactor * sum_j f * (d_ij / |d_ij|)
+// 圧力を 1 ステップ前の密度から作ると、圧力が過剰に効いては抜ける往復 (振動) になる
+// (周囲に同種が少なく、ルールの力で押し込まれ続ける粒子で特に目立つ)。粘性は残りの揺れを抑える。
 // その後  v = v * friction + accel * dt;  |v| <= maxSpeed にクランプ;  x = wrap(x + v * dt)
 //
 // 近傍探索: セル幅 >= rMax / K (K = P.reach)、自分の列から ±K 列を見る。列ごとに
@@ -26,19 +29,49 @@ import { COMMON_WGSL } from './common.wgsl.js';
 // 64 / 128 / 256 を NVIDIA(Ampere) と Intel(Xe) で計測: 128 が NVIDIA で数 % 速く Intel では同等。32 は大幅に遅い。
 export const FORCE_WORKGROUP = 128;
 
-export const forceWGSL = COMMON_WGSL + /* wgsl */`
+// 近傍セルの走査 (force / density 共通)。範囲ごとに fn(start, end, xi, yi, row, myP, myV, halfW, halfH) を呼んで acc に足す。
+// 呼び出し側が xi, yi, xc, cx, cy, K, nxi, nyi, cellW, ... を定義済みであること。
+const neighbourLoop = (fn, accInit) => /* wgsl */`
+  // nx, ny >= 2K + 1 なので、±K 列 / ±K 行は周期境界で回り込んでも重複しない
+  var acc = ${accInit};
+  for (var o = -K; o <= K; o++) {
+    let c = cx + o;
+    // この列までの x 方向の最短距離 (自分の列なら 0)
+    let gap = max(0.0, max(f32(c) - xc, xc - f32(c + 1))) * cellW;
+    if (gap >= P.rMax) { continue; }
+    let h = sqrt(P.rMax2 - gap * gap);  // この列で必要な y の半幅
+    let lo = max(cy - K, i32(floor((yi - h) * P.invCellH)));
+    let hi = min(cy + K, i32(floor((yi + h) * P.invCellH)));
+
+    var col = c;
+    if (col < 0) { col += nxi; } else if (col >= nxi) { col -= nxi; }
+    let base = u32(col) * P.ny;
+
+    // セル番号は x-major (cx * ny + cy) なので、同じ列の行 lo..hi は番号が連続し、
+    // ソート済みバッファ上でも 1 つの連続範囲になる。y の端では回り込みで 2 範囲に分かれる。
+    if (lo < 0) {
+      acc += ${fn}(firstCellParticle[base + u32(lo + nyi)], firstCellParticle[base + P.ny], xi, yi, row, myP, myV, halfW, halfH);
+      acc += ${fn}(firstCellParticle[base], firstCellParticle[base + u32(hi + 1)], xi, yi, row, myP, myV, halfW, halfH);
+    } else if (hi >= nyi) {
+      acc += ${fn}(firstCellParticle[base + u32(lo)], firstCellParticle[base + P.ny], xi, yi, row, myP, myV, halfW, halfH);
+      acc += ${fn}(firstCellParticle[base], firstCellParticle[base + u32(hi - nyi + 1)], xi, yi, row, myP, myV, halfW, halfH);
+    } else {
+      acc += ${fn}(firstCellParticle[base + u32(lo)], firstCellParticle[base + u32(hi + 1)], xi, yi, row, myP, myV, halfW, halfH);
+    }
+  }
+`;
+
+export const forceWGSL = (pressure, visc) => COMMON_WGSL + /* wgsl */`
 @group(0) @binding(1) var<storage, read> srcPosType: array<vec4f>;     // セル順 (x, y, f32(type), pressure)
 @group(0) @binding(2) var<storage, read> srcVelId: array<vec4f>;       // セル順 (vx, vy, f32(id), -)
 @group(0) @binding(3) var<storage, read> firstCellParticle: array<u32>;
 @group(0) @binding(4) var<storage, read> rules: array<f32>;            // numTypes * numTypes
 @group(0) @binding(5) var<storage, read_write> dstPosVel: array<vec4f>;
 @group(0) @binding(6) var<storage, read_write> dstMeta: array<vec2u>;
-@group(0) @binding(7) var<storage, read_write> dstDensity: array<f32>;
 
-// ソート済み index の範囲 [start, end) にいる全パーティクルから受ける力 (未スケール) と密度を合計する。
-// 戻り値 = (fx, fy, density)
-fn accumulate(start: u32, end: u32, xi: f32, yi: f32, row: u32, myP: f32, halfW: f32, halfH: f32) -> vec3f {
-  var acc = vec3f(0.0);
+// ソート済み index の範囲 [start, end) にいる全パーティクルから受ける力 (未スケール) を合計する。
+fn accumulate(start: u32, end: u32, xi: f32, yi: f32, row: u32, myP: f32, myV: vec2f, halfW: f32, halfH: f32) -> vec2f {
+  var acc = vec2f(0.0);
   for (var k = start; k < end; k++) {
     let pj = srcPosType[k];
 
@@ -59,9 +92,18 @@ fn accumulate(start: u32, end: u32, xi: f32, yi: f32, row: u32, myP: f32, halfW:
     } else {
       f = rules[row + u32(pj.z)] * (1.0 - abs(2.0 * r - 1.0 - P.beta) * P.invOneMinusBeta);
     }
+${pressure ? `
     let q = 1.0 - r;
-    f -= P.pressureScale * (myP + pj.w) * q;
-    acc += vec3f(vec2f(dx, dy) * (f * invD), q * q);
+    let pSum = myP + pj.w;                                 // pj.w = 圧力 (density パスが書く)
+    f -= P.pressureScale * pSum * q;
+${visc ? `
+    // 圧力がかかっているペアだけ、法線方向の相対速度を減衰 (圧力に比例して 0 -> 1 に立ち上げる)。
+    // 速度は範囲内の相手だけ読む
+    let vj = srcVelId[k].xy;
+    f += P.viscosity * q * min(pSum, 1.0) * ((vj.x - myV.x) * dx + (vj.y - myV.y) * dy) * invD;
+` : ''}
+` : ''}
+    acc += vec2f(dx, dy) * (f * invD);
   }
   return acc;
 }
@@ -76,7 +118,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let myType = u32(me.z);
   let xi = me.x;
   let yi = me.y;
-  let myP = me.w;
+  let myP = ${pressure ? 'me.w' : '0.0'};
+  let myV = mv.xy;
   let row = myType * P.numTypes;       // rules[row + typeJ]: i が j にどれだけ引かれるか
   let halfW = P.worldW * 0.5;
   let halfH = P.worldH * 0.5;
@@ -90,33 +133,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let nyi = i32(P.ny);
   let cellW = 1.0 / P.invCellW;
 
-  // nx, ny >= 2K + 1 なので、±K 列 / ±K 行は周期境界で回り込んでも重複しない
-  var acc = vec3f(0.0);
-  for (var o = -K; o <= K; o++) {
-    let c = cx + o;
-    // この列までの x 方向の最短距離 (自分の列なら 0)
-    let gap = max(0.0, max(f32(c) - xc, xc - f32(c + 1))) * cellW;
-    if (gap >= P.rMax) { continue; }
-    let h = sqrt(P.rMax2 - gap * gap);  // この列で必要な y の半幅
-    let lo = max(cy - K, i32(floor((yi - h) * P.invCellH)));
-    let hi = min(cy + K, i32(floor((yi + h) * P.invCellH)));
-
-    var col = c;
-    if (col < 0) { col += nxi; } else if (col >= nxi) { col -= nxi; }
-    let base = u32(col) * P.ny;
-
-    // セル番号は x-major (cx * ny + cy) なので、同じ列の行 lo..hi は番号が連続し、
-    // ソート済みバッファ上でも 1 つの連続範囲になる。y の端では回り込みで 2 範囲に分かれる。
-    if (lo < 0) {
-      acc += accumulate(firstCellParticle[base + u32(lo + nyi)], firstCellParticle[base + P.ny], xi, yi, row, myP, halfW, halfH);
-      acc += accumulate(firstCellParticle[base], firstCellParticle[base + u32(hi + 1)], xi, yi, row, myP, halfW, halfH);
-    } else if (hi >= nyi) {
-      acc += accumulate(firstCellParticle[base + u32(lo)], firstCellParticle[base + P.ny], xi, yi, row, myP, halfW, halfH);
-      acc += accumulate(firstCellParticle[base], firstCellParticle[base + u32(hi - nyi + 1)], xi, yi, row, myP, halfW, halfH);
-    } else {
-      acc += accumulate(firstCellParticle[base + u32(lo)], firstCellParticle[base + u32(hi + 1)], xi, yi, row, myP, halfW, halfH);
-    }
-  }
+${neighbourLoop('accumulate', 'vec2f(0.0)')}
 
   var ax = acc.x * P.accelScale;
   var ay = acc.y * P.accelScale;
@@ -148,6 +165,57 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
   dstPosVel[i] = vec4f(nxp, nyp, v);
   dstMeta[i] = vec2u(myType, u32(mv.z));
-  dstDensity[i] = acc.z;
+}
+`;
+
+// 密度だけを先に求めるパス (現在の位置から。force が同じステップの圧力を使えるようにする)。
+// density_i = sum_j (1 - r)^2 を数え、圧力 = max(0, density - restDensity) を posType.w に書く。
+export const densityWGSL = COMMON_WGSL + /* wgsl */`
+// posType は .xy だけ読んで .w (= 圧力) だけ書く。別々のメモリ位置なので競合しない。
+@group(0) @binding(1) var<storage, read_write> posType: array<vec4f>;       // セル順 (x, y, f32(type), pressure)
+@group(0) @binding(2) var<storage, read> firstCellParticle: array<u32>;
+@group(0) @binding(3) var<storage, read_write> dstDensity: array<f32>;      // 読み戻し (デバッグ) 用
+
+fn accumulate(start: u32, end: u32, xi: f32, yi: f32, row: u32, myP: f32, myV: vec2f, halfW: f32, halfH: f32) -> f32 {
+  var sum = 0.0;
+  for (var k = start; k < end; k++) {
+    let pj = posType[k].xy;
+    var dx = pj.x - xi;
+    var dy = pj.y - yi;
+    if (dx > halfW) { dx -= P.worldW; } else if (dx < -halfW) { dx += P.worldW; }
+    if (dy > halfH) { dy -= P.worldH; } else if (dy < -halfH) { dy += P.worldH; }
+    let d2 = dx * dx + dy * dy;
+    if (d2 >= P.rMax2 || d2 == 0.0) { continue; }   // force と同じ範囲判定
+    let q = 1.0 - sqrt(d2) * P.invRMax;
+    sum += q * q;
+  }
+  return sum;
+}
+
+@compute @workgroup_size(${FORCE_WORKGROUP})
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= P.numParticles) { return; }
+
+  let me = posType[i].xy;
+  let xi = me.x;
+  let yi = me.y;
+  let halfW = P.worldW * 0.5;
+  let halfH = P.worldH * 0.5;
+  let xc = xi * P.invCellW;
+  let cx = i32(min(P.nx - 1u, u32(xc)));
+  let cy = i32(min(P.ny - 1u, u32(yi * P.invCellH)));
+  let K = i32(P.reach);
+  let nxi = i32(P.nx);
+  let nyi = i32(P.ny);
+  let cellW = 1.0 / P.invCellW;
+  let row = 0u;                 // accumulate の共通シグネチャのための未使用値
+  let myP = 0.0;
+  let myV = vec2f(0.0);
+
+${neighbourLoop('accumulate', '0.0')}
+
+  posType[i].w = max(0.0, acc - P.restDensity);
+  dstDensity[i] = acc;
 }
 `;

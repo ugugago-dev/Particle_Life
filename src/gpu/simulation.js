@@ -1,12 +1,14 @@
 // Particle Life の GPU 版: バッファ + コンピュートパイプライン + step の encode。DOM には触れない。
 //
 // 1 ステップのパス (すべて同じ compute pass 内、dispatch 間はストレージの書き込みが自動で同期される):
-//   countCells -> prefixSum (+ セル個数のクリア) -> scatter -> force
+//   countCells -> prefixSum (+ セル個数のクリア) -> scatter -> (density) -> force
 //
 //   バッファ A : 「現在の状態」 (x, y, vx, vy, type, id, density)。ステップの入力かつ出力。描画も A を読む。
 //   バッファ B : scatter でセル順に並べ替えた作業コピー。force が読む (近傍が連続メモリになる)。
 //                近傍ループが 1 回の 16 バイト読み込みで済むよう (x, y, type, pressure) と
-//                (vx, vy, id) に詰め替えてある。
+//                (vx, vy, id) に詰め替えてある。pressure は density パスが書く
+//                (圧縮の制限が無効でも、描画が density を要るとき (needDensity) は density パスを走らせる。
+//                その場合 force は圧力を読まない variant なので物理は変わらない)。速度は viscosity > 0 のときだけ読む。
 //   force は B を読んで A に書く (近傍の位置を読み続けるので in-place は不可)。
 //   A も B も同じ「セル順」の並びになる。id (= meta.y) で元の index を追える。
 //
@@ -19,13 +21,16 @@ import {
     PARTICLE_WORKGROUP,
     countCellsWGSL, prefixSumWGSL, scatterWGSL, wrapAllWGSL,
 } from './shaders/grid.wgsl.js';
-import { FORCE_WORKGROUP, forceWGSL } from './shaders/force.wgsl.js';
+import { FORCE_WORKGROUP, forceWGSL, densityWGSL } from './shaders/force.wgsl.js';
 import { alloc, randomize as randomizeState } from '../particles.js';
 
 /** セル数の上限 (rMax が極端に小さいときのメモリ保護。GUI の範囲では到達しない)。 */
 const MAX_CELLS = 1 << 22;
 /** dispatch 次元の上限 65535 x workgroup size から決まるパーティクル数の上限。 */
 const MAX_PARTICLES = 65535 * FORCE_WORKGROUP;
+
+/** ペアごとの速度減衰 viscosity * accelScale * dt の上限 (これを超えると explicit な減衰が振動・発散する)。 */
+const MAX_VISCOSITY_STEP = 0.01;
 
 const STORAGE = GPUBufferUsage.STORAGE;
 const COPY_SRC = GPUBufferUsage.COPY_SRC;
@@ -86,7 +91,10 @@ export class GpuSimulation {
                 count: await make('countCells', countCellsWGSL),
                 scan: await make('prefixSum', prefixSumWGSL),
                 scatter: await make('scatter', scatterWGSL),
-                force: await make('force', forceWGSL),
+                force: await make('force', forceWGSL(false, false)),
+                forceP: await make('forceP', forceWGSL(true, false)),
+                forcePV: await make('forcePV', forceWGSL(true, true)),
+                density: await make('density', densityWGSL),
                 wrap: await make('wrapAll', wrapAllWGSL),
             };
         });
@@ -105,7 +113,7 @@ export class GpuSimulation {
         this.buffers = {
             posVelA: mk('posVel A', m * 16),   // vec4f (x, y, vx, vy)
             metaA: mk('meta A', m * 8),        // vec2<u32> (type, id)
-            densityA: mk('density A', m * 4),  // f32 (前ステップの重み付き近傍数。圧力の計算用)
+            densityA: mk('density A', m * 4),  // f32 (重み付き近傍数。density パスが書く。デバッグの読み戻し用)
             posTypeB: mk('posType B (cell-sorted)', m * 16),  // vec4f (x, y, type, pressure)
             velIdB: mk('velId B (cell-sorted)', m * 16),      // vec4f (vx, vy, id, 0)
             slot: mk('particleSlot', m * 8),   // vec2<u32> (cell, セル内通し番号)
@@ -157,9 +165,13 @@ export class GpuSimulation {
         const { numCellParticles, firstCellParticle } = cellBuffers;
         this.bindGroups.count = bg('count', [posVelA, numCellParticles, slot]);
         this.bindGroups.scan = bg('scan', [numCellParticles, firstCellParticle]);
-        this.bindGroups.scatter = bg('scatter', [posVelA, metaA, densityA, slot, firstCellParticle, posTypeB, velIdB]);
+        this.bindGroups.scatter = bg('scatter', [posVelA, metaA, slot, firstCellParticle, posTypeB, velIdB]);
+        this.bindGroups.density = bg('density', [posTypeB, firstCellParticle, densityA]);
         if (rulesBuffer) {
-            this.bindGroups.force = bg('force', [posTypeB, velIdB, firstCellParticle, rulesBuffer, posVelA, metaA, densityA]);
+            const forceBuffers = [posTypeB, velIdB, firstCellParticle, rulesBuffer, posVelA, metaA];
+            this.bindGroups.force = bg('force', forceBuffers);
+            this.bindGroups.forceP = bg('forceP', forceBuffers);
+            this.bindGroups.forcePV = bg('forcePV', forceBuffers);
         }
     }
 
@@ -186,7 +198,7 @@ export class GpuSimulation {
         if (n > 0) {
             queue.writeBuffer(this.buffers.posVelA, 0, pv);
             queue.writeBuffer(this.buffers.metaA, 0, meta);
-            queue.writeBuffer(this.buffers.densityA, 0, new Float32Array(n)); // 圧力なしから始める
+            queue.writeBuffer(this.buffers.densityA, 0, new Float32Array(n));
         }
     }
 
@@ -373,6 +385,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         f[FIELD.maxSpeed] = params.limitSpeed ? Math.max(params.maxSpeed, 0) : 0;
         f[FIELD.restDensity] = params.restDensity;
         f[FIELD.pressureScale] = params.limitPressure ? 0.5 * Math.max(params.pressureStrength, 0) : 0;
+        // 圧縮中のペアの減衰。ペアごとの減衰係数 viscosity * accelScale * dt が大きすぎると発散するので上限を付ける
+        f[FIELD.viscosity] = params.limitPressure
+            ? Math.min(Math.max(params.viscosity, 0), MAX_VISCOSITY_STEP / (rMax * params.forceFactor * dt)) : 0;
+        this.viscosityOn = f[FIELD.viscosity] > 0;
 
         this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData);
     }
@@ -380,13 +396,17 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     /**
      * 1 フレーム分のシミュレーションを encoder に積む (CPU 読み戻しなし)。
      * @param {GPUCommandEncoder} encoder
-     * @param {{params: object, pointer?: object, steps: number, dt?: number,
+     * @param {{params: object, pointer?: object, steps: number, dt?: number, needDensity?: boolean,
      *          timestampWrites?: GPUComputePassTimestampWrites}} opts
+     *   needDensity: 描画 (organic) が densityA を読むとき true。圧縮の制限が無効でも density パスを走らせる
+     *                (force の variant は圧力だけで決まるので、物理は変わらない)。
      *   steps 回の substep を 1 つの compute pass にまとめる。steps = 0 でも (計測用に) 空の pass を作る。
      */
-    encode(encoder, { params, pointer, steps, dt = params.dt, timestampWrites }) {
+    encode(encoder, { params, pointer, steps, dt = params.dt, needDensity = false, timestampWrites }) {
         if (!this.buffers || !this.rulesBuffer) throw new Error('GpuSimulation: setRules / setCount first');
         this.configureGrid(params.rMax, params.cellsPerRMax);
+        this.pressureOn = !!params.limitPressure && params.pressureStrength > 0;
+        this.densityOn = this.pressureOn || !!needDensity;   // density パスの要否 (force の variant は pressureOn だけで決める)
         this.writeUniforms(params, pointer, dt);
         const pass = encoder.beginComputePass({ label: 'simulation', timestampWrites });
         if (this.count > 0) {
@@ -411,9 +431,16 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         pass.setPipeline(pipelines.scatter);
         pass.setBindGroup(0, bindGroups.scatter);
         pass.dispatchWorkgroups(particleGroups);
-        // 4. 力の計算 + 積分 (B -> A)
-        pass.setPipeline(pipelines.force);
-        pass.setBindGroup(0, bindGroups.force);
+        // 4. 密度 -> 圧力 (圧縮の制限が有効か、描画が density を要るときだけ。力と同じ位置から作るので 1 ステップ遅れない)
+        if (this.densityOn) {
+            pass.setPipeline(pipelines.density);
+            pass.setBindGroup(0, bindGroups.density);
+            pass.dispatchWorkgroups(ceilDiv(count, FORCE_WORKGROUP));
+        }
+        // 5. 力の計算 + 積分 (B -> A)
+        const force = !this.pressureOn ? 'force' : this.viscosityOn ? 'forcePV' : 'forceP';
+        pass.setPipeline(pipelines[force]);
+        pass.setBindGroup(0, bindGroups[force]);
         pass.dispatchWorkgroups(ceilDiv(count, FORCE_WORKGROUP));
     }
 
@@ -423,6 +450,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
      * 現在の状態 (バッファ A) を CPU に読み戻す。通常のフレームループでは使わない。
      * @returns {Promise<{count:number, x:Float32Array, y:Float32Array, vx:Float32Array, vy:Float32Array,
      *                    type:Uint32Array, id:Uint32Array, density:Float32Array}>}
+     *   density は density パスが走ったとき (圧縮の制限が有効、または encode の needDensity) だけ更新される (それ以外は 0 / 古いまま)。
      */
     async readState() {
         const { device, count } = this;

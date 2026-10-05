@@ -19,6 +19,7 @@ export const defaults = Object.freeze({
     limitPressure: true,
     restDensity: 20,         // weighted neighbour count sum (1 - r/rMax)^2 above which pressure pushes back
     pressureStrength: 0.005,  // pressure force relative to the rule forces (0 = off)
+    viscosity: 0,            // extra damping of the relative velocity between compressed neighbours (0 = off; costs a velocity read)
 
     // time stepping
     dt: 0.01,                // fixed step per substep
@@ -36,6 +37,17 @@ export const defaults = Object.freeze({
     particleRadius: 0.2,     // CSS px
     trails: false,
     showMatrix: true,
+
+    // organic rendering (screen-space metaballs; see docs/organic-rendering-spec.md)
+    renderMode: 'organic',   // 'dots' | 'organic'
+    fieldScale: 0.5,         // field texture resolution relative to the canvas
+    splatRadius: 0.7,        // x rMax
+    threshold: 0.5,          // membrane threshold on the accumulated field
+    edge: 0.08,              // softness of the membrane edge
+    coreBoost: 1.5,          // field weight of densely packed particles (dark nucleus)
+    stretch: 0.5,            // elongation along the velocity
+    rimStrength: 0.8,
+    showParticles: false,    // overlay the dots (faint) on top of the organic look
 });
 
 /** Fresh mutable copy of the defaults (the live params object). */
