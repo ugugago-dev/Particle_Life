@@ -1,0 +1,147 @@
+:root {
+    --bg: rgb(1, 14, 29);
+    --panel: rgba(6, 16, 32, 0.72);
+    --panel-border: rgba(160, 200, 255, 0.16);
+    --text: #cfe3ff;
+    --text-dim: rgba(207, 227, 255, 0.55);
+    --attract: 46, 204, 113;
+    --repel: 231, 76, 60;
+    --cell: 22px;
+}
+
+html,
+body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background-color: var(--bg);
+}
+
+/* The canvas fills the viewport; its backing size is set by the renderer (CSS size x devicePixelRatio). */
+canvas {
+    position: fixed;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* ---- stats overlay (top-left) ---- */
+.stats {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    color: var(--text);
+    font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre;
+    pointer-events: none;
+    user-select: none;
+}
+
+/* ---- rule matrix editor (bottom-left) ---- */
+.matrix-panel {
+    position: fixed;
+    left: 8px;
+    bottom: 8px;
+    padding: 8px;
+    border-radius: 8px;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    color: var(--text);
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.matrix-panel[hidden] {
+    display: none;
+}
+
+.matrix-caption {
+    margin-bottom: 6px;
+    color: var(--text);
+}
+
+.matrix-help {
+    margin-top: 6px;
+    color: var(--text-dim);
+    font-size: 10px;
+}
+
+.matrix-grid {
+    display: grid;
+    gap: 2px;
+    width: max-content;
+}
+
+.matrix-head {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--cell);
+    height: var(--cell);
+}
+
+.matrix-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+
+.matrix-cell {
+    width: var(--cell);
+    height: var(--cell);
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.06);
+    cursor: pointer;
+}
+
+.matrix-cell:hover {
+    outline: 1px solid rgba(255, 255, 255, 0.7);
+    outline-offset: -1px;
+}
+
+/* ---- WebGPU unavailable / device lost message (centered) ---- */
+.unsupported {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 24px;
+    text-align: center;
+    color: var(--text);
+    background: var(--bg);
+    font: 14px/1.6 system-ui, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+    z-index: 10;
+}
+
+.unsupported-title {
+    font-size: 20px;
+    font-weight: 600;
+}
+
+.unsupported-hint {
+    color: var(--text);
+}
+
+.unsupported-detail {
+    max-width: 640px;
+    color: var(--text-dim);
+    font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
