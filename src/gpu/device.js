@@ -1,7 +1,7 @@
-// WebGPU の初期化と、非対応環境でのメッセージ表示。DOM に触るのは showUnsupported だけ。
+// WebGPU の初期化と非対応時のメッセージ
 
 /**
- * adapter / device を取得する (canvas には触らない。テスト用ハーネスからも使う)。
+ * canvas には触らない (テスト用ハーネスからも使う)。
  * @returns {Promise<{ok: true, adapter: GPUAdapter, device: GPUDevice, timestamps: boolean}
  *                  | {ok: false, reason: string}>}
  */
@@ -17,7 +17,6 @@ export async function requestGPU() {
     }
     if (!adapter) return { ok: false, reason: 'no suitable GPU adapter' };
 
-    // timestamp-query は任意 (あれば GPU 時間を統計に出す)
     const timestamps = adapter.features.has('timestamp-query');
     try {
         const device = await adapter.requestDevice({
@@ -29,7 +28,6 @@ export async function requestGPU() {
     }
 }
 
-/** canvas を WebGPU コンテキストとして設定する。 */
 export function configureCanvas(canvas, device) {
     const context = canvas.getContext('webgpu');
     if (!context) return { ok: false, reason: 'canvas.getContext("webgpu") returned null' };
@@ -38,10 +36,7 @@ export function configureCanvas(canvas, device) {
     return { ok: true, context, format };
 }
 
-/**
- * validation / out-of-memory エラーを Error として投げる形で fn を実行する。
- * パイプライン生成時の WGSL コンパイルエラーなどを確実に見つけるために使う。
- */
+/** validation / out-of-memory エラーを例外にして fn を実行する (パイプライン生成のエラーを確実に拾うため)。 */
 export async function withErrorScope(device, label, fn) {
     device.pushErrorScope('validation');
     device.pushErrorScope('out-of-memory');
@@ -57,7 +52,7 @@ export async function withErrorScope(device, label, fn) {
     return result;
 }
 
-/** WGSL を ShaderModule にし、コンパイルエラーがあれば行番号つきで投げる。 */
+/** コンパイルエラーは行番号つきで投げる。 */
 export async function createShaderModule(device, label, code) {
     const module = device.createShaderModule({ label, code });
     const info = await module.getCompilationInfo();
@@ -72,10 +67,7 @@ export async function createShaderModule(device, label, code) {
     return module;
 }
 
-/**
- * 画面中央にメッセージを出す (以降は何も動かさない)。
- * kind: 'unsupported' = WebGPU が使えない / 'lost' = デバイス喪失 / 'error' = 初期化中のエラー
- */
+/** kind: 'unsupported' | 'lost' (デバイス喪失) | 'error' (初期化中のエラー) */
 export function showUnsupported(reason, kind = 'unsupported') {
     const TEXT = {
         unsupported: ['このブラウザ/端末は WebGPU に対応していません', 'Chrome / Edge の最新版でお試しください。'],

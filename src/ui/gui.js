@@ -2,10 +2,8 @@ import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.20/+esm';
 import { ORGANIC_STYLES } from '../organicStyles.js';
 
 /**
- * Build the lil-gui panel. It edits `params` directly (the live params object)
- * and calls `actions` for anything that needs more than a value change.
- *
- * @param {object} params live params object (see config.js)
+ * Edits `params` in place; `actions` handle anything that needs more than a value change.
+ * @param {object} params
  * @param {{
  *   setNumParticles: (n: number) => void,
  *   setNumTypes: (n: number) => void,
@@ -37,7 +35,7 @@ export function createGUI(params, actions) {
     limits.add(params, 'viscosity', 0, 5, 0.1);
 
     const world = gui.addFolder('Particles');
-    // Re-initialise on release so dragging the slider does not rebuild every frame.
+    // on release, so dragging does not rebuild every frame
     world.add(params, 'numParticles', 1000, 500000, 1000).onFinishChange(actions.setNumParticles);
     world.add(params, 'numTypes', 1, 12, 1).onFinishChange(actions.setNumTypes);
 
@@ -57,7 +55,7 @@ export function createGUI(params, actions) {
     organic.add(params, 'splatRadius', 0.2, 1.5, 0.01).name('splatRadius (x rMax)');
     organic.add(params, 'fieldGain', 0.2, 4, 0.01);
     organic.add(params, 'blurSmall', 0.05, 1.5, 0.01).name('blurSmall (x rMax)');
-    // style-specific controls: shown only for the styles that read them (ORGANIC_STYLES[style].params)
+    // shown only for the styles that read them
     const styleControls = {
         blurLarge: organic.add(params, 'blurLarge', 0.3, 4, 0.01).name('blurLarge (x rMax)'),
         speciesTint: organic.add(params, 'speciesTint', 0, 1, 0.01),

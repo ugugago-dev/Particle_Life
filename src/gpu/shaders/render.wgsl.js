@@ -1,45 +1,38 @@
-// 描画用 WGSL。頂点バッファなし: instance = 1 パーティクル、4 頂点 (triangle-strip の 2 三角形) の四角形を
-// vertex_index から作り、フラグメントで円 (滑らかなアルファ) にする。
-// 位置・種類はシミュレーションのストレージバッファを直接読む。
-//
-// 座標: ワールド (x in [0, worldW), y in [0, 1)) -> デバイス px (y は下向き) -> NDC。
-// 色は Canvas2D 版と同じくガンマ空間の値をそのまま書く (canvas format は非 sRGB)。
+// dots / トレイル / ポインタ円の WGSL。色は Canvas2D 版と同じくガンマ空間の値をそのまま書く (canvas は非 sRGB)
 
 export const MAX_PALETTE = 16;
 
-// RenderParams = 48 バイト = 12 個の f32 (vec2f は 8 バイト境界: offset 0, 8, 32 に置いてある)
+// RenderParams = 12 個の f32 (vec2f は 8 バイト境界に置いてある)
 export const RENDER_UNIFORM_FLOATS = 12;
 
 export const RENDER_COMMON = /* wgsl */`
 struct RenderParams {
-  worldSize: vec2f,     // (worldW, worldH)
-  canvasSize: vec2f,    // バックバッファの px
-  radiusPx: f32,        // パーティクル半径 (デバイス px)
-  pointerRadiusPx: f32, // ポインタ円の半径 (デバイス px)
-  lineWidthPx: f32,     // ポインタ円の線幅 (デバイス px)
-  fade: f32,            // トレイルの BG 混合率
-  pointerPos: vec2f,    // ワールド座標
+  worldSize: vec2f,
+  canvasSize: vec2f,    // 以下 px はすべてデバイス px
+  radiusPx: f32,
+  pointerRadiusPx: f32,
+  lineWidthPx: f32,
+  fade: f32,
+  pointerPos: vec2f,
   pointerMode: f32,     // +1 引力 / -1 斥力
-  particleAlpha: f32,   // パーティクルの不透明度 (dots: 1 / organic の重ね描き: 0.3)
+  particleAlpha: f32,
 };
 
 @group(0) @binding(0) var<uniform> R: RenderParams;
 
-const BG = vec3f(1.0 / 255.0, 14.0 / 255.0, 29.0 / 255.0);   // style.css の --bg と同じ
+const BG = vec3f(1.0 / 255.0, 14.0 / 255.0, 29.0 / 255.0);   // style.css の --bg
 
-// 4 頂点 (triangle-strip、instance ごとに別のストリップ) の四角形: vertex_index -> [-1, 1]^2 の角
-// (-1,-1) (1,-1) (-1,1) (1,1)。triangle-list の 6 頂点より頂点シェーダの実行が 1/3 少ない
+// triangle-strip の 4 頂点の四角形 ([-1, 1]^2)
 fn quadCorner(vi: u32) -> vec2f {
   return vec2f(f32(vi & 1u), f32(vi >> 1u)) * 2.0 - 1.0;
 }
 
-// デバイス px (左上原点) -> NDC
 fn pxToNdc(px: vec2f) -> vec2f {
   return vec2f(px.x / R.canvasSize.x * 2.0 - 1.0, 1.0 - px.y / R.canvasSize.y * 2.0);
 }
 `;
 
-// 全画面三角形 (fade / blit / organic の全画面パス共通)。頂点バッファなし: (0,0) (2,0) (0,2)
+// 全画面三角形
 export const FULLSCREEN_VS = /* wgsl */`
 @vertex
 fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
@@ -64,7 +57,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut
   let p = posVel[ii];
   let t = min(particleMeta[ii].x, ${MAX_PALETTE - 1}u);
   let corner = quadCorner(vi);
-  let half = R.radiusPx + 1.0;                           // AA 用に 1px の余白
+  let half = R.radiusPx + 1.0;                           // AA 用の 1px
   let centerPx = p.xy / R.worldSize * R.canvasSize;
   var out: VSOut;
   out.offsetPx = corner * half;
@@ -76,12 +69,11 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
   let d = length(in.offsetPx);
-  let a = clamp(R.radiusPx + 0.5 - d, 0.0, 1.0);        // 縁 1px の線形カバレッジ
+  let a = clamp(R.radiusPx + 0.5 - d, 0.0, 1.0);
   return vec4f(in.color, a * R.particleAlpha);
 }
 `;
 
-// トレイル: 永続テクスチャを BG 色で薄くフェードさせる (全画面三角形、アルファブレンド)
 export const fadeWGSL = RENDER_COMMON + FULLSCREEN_VS + /* wgsl */`
 @fragment
 fn fs() -> @location(0) vec4f {
@@ -89,7 +81,6 @@ fn fs() -> @location(0) vec4f {
 }
 `;
 
-// トレイルテクスチャ -> canvas (同サイズなので textureLoad で等倍コピー)
 export const blitWGSL = FULLSCREEN_VS + /* wgsl */`
 @group(0) @binding(0) var src: texture_2d<f32>;
 
@@ -99,8 +90,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 }
 `;
 
-// ポインタの影響円。ワールドが周期境界なので 3x3 = 9 個のコピーを instance で描く
-// (画面外のコピーはクリップで消える)。
+// ポインタ円: 周期境界なので 3x3 のコピーを instance で描く
 export const pointerWGSL = RENDER_COMMON + /* wgsl */`
 struct VSOut {
   @builtin(position) pos: vec4f,

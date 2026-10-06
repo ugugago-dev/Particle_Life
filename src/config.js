@@ -1,9 +1,6 @@
-// Default parameters: the single source of truth.
-// Units: the world is `height = 1` (width = canvas aspect ratio). Distances,
-// rMax and pointerRadius are in world units; time is in simulation seconds.
+// Default parameters. World units: height = 1 (width = canvas aspect ratio); time in simulation seconds.
 
 export const defaults = Object.freeze({
-    // particles / rules
     numParticles: 60000,     // GPU version (the CPU version used 3000)
     numTypes: 6,
 
@@ -38,30 +35,26 @@ export const defaults = Object.freeze({
     trails: false,
     showMatrix: true,
 
-    // organic rendering (screen-space density field; see docs/organic-rendering-spec.md)
-    // The splatted field is normalised so that the world's mean density reads 1.0 (robust to N, canvas size, rMax);
-    // fieldGain scales it. Blur radii are Gaussian sigmas in x rMax.
-    // Thresholds are tuned to the measured density of the defaults above (60k particles, 16:9, 15 s of random rules):
-    // the gas between structures is made of small clumps reading ~0.5-2 at splatRadius 0.5, structure cores read 5-25.
+    // organic rendering (docs/organic-rendering-spec.md). The field reads 1 at the mean density; thresholds are tuned to its measured density
     renderMode: 'organic',   // 'dots' | 'organic'
     organicStyle: 'glass',   // 'glass' | 'cell' | 'glow' | 'bands' | 'mono'
-    fieldScale: 0.5,         // field texture resolution relative to the canvas
+    fieldScale: 0.5,         // field resolution / canvas
     splatRadius: 0.5,        // x rMax
-    fieldGain: 1,            // multiplier on the normalised field (all styles)
-    blurSmall: 0.15,         // x rMax, the "disk" (small) blur
-    blurLarge: 0.45,         // x rMax, the "ring" (large) blur (computed at reduced resolution when wide)
-    speciesTint: 0.3,        // how much of the particle-type colour is mixed into the style colours (0 = none)
-    glowIntensity: 1,        // glow: brightness of the outline
-    bandFreq: 25,            // bands: sin(vec3(1,2,3) * bandFreq * r^3), r = bandBase + 0.8 * compressed density
-    bandBase: 0.24,          // bands: r of empty space (st1's density_target); bandFreq * bandBase^3 ~ 0.35 = light blue
-    threshold: 1.5,          // density (x mean) below which cell/glow/mono see "empty": drops ~90% of the gas clumps, keeps thin membranes partly
-    nucleusThreshold: 0.7,   // cell: how full the large-blur neighbourhood must be (0..1) for the nucleus to start
-    coreThreshold: 0.8,      // glass: compressed density (0..1) where the flat core starts (0.8 ~ 4.6 x mean at the fine splat; drops most gas clumps)
-    rimStrength: 1.3,        // glass: thickness/opacity of the white membrane line
-    showParticles: false,    // overlay the dots (faint) on top of the organic look
+    fieldGain: 1,
+    blurSmall: 0.15,         // x rMax, Gaussian sigma of the "disk" blur
+    blurLarge: 0.45,         // x rMax, Gaussian sigma of the "ring" blur
+    speciesTint: 0.3,        // how much of the particle-type colour is mixed into the style colours
+    glowIntensity: 1,
+    bandFreq: 25,            // bands: phase = bandFreq * r^3
+    bandBase: 0.24,          // bands: r of empty space (phase 0.35 = light blue)
+    threshold: 1.5,          // cell/glow/mono: density (x mean) below which is empty; drops ~90% of the gas clumps
+    nucleusThreshold: 0.7,   // cell: large-blur occupancy (0..1) where the nucleus starts
+    coreThreshold: 0.8,      // glass: compressed density (0..1) where the core starts (~4.6 x mean)
+    rimStrength: 1.3,        // glass: membrane line width / opacity
+    showParticles: false,    // faint dots on top of the organic look
 });
 
-/** Fresh mutable copy of the defaults (the live params object). */
+/** The live (mutable) params object. */
 export function createParams() {
     return { ...defaults };
 }

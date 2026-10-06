@@ -1,19 +1,5 @@
-// Particle Life の GPU 版: バッファ + コンピュートパイプライン + step の encode。DOM には触れない。
-//
-// 1 ステップのパス (すべて同じ compute pass 内、dispatch 間はストレージの書き込みが自動で同期される):
-//   countCells -> prefixSum (+ セル個数のクリア) -> scatter -> (density) -> force
-//
-//   バッファ A : 「現在の状態」 (x, y, vx, vy, type, id, density)。ステップの入力かつ出力。描画も A を読む。
-//   バッファ B : scatter でセル順に並べ替えた作業コピー。force が読む (近傍が連続メモリになる)。
-//                近傍ループが 1 回の 16 バイト読み込みで済むよう (x, y, type, -) と (vx, vy, id) に詰め替えてある。
-//                圧縮の制限が有効なときは density パスが (x, y, type, pressure) を posTypeP に書き、force はそちらを読む
-//                (近傍ループが読むバッファをすべて read のバインディングにするため。in-place で .w に書くと read_write になる)。
-//                速度は viscosity > 0 のときだけ読む。
-//   force は B を読んで A に書く (近傍の位置を読み続けるので in-place は不可)。
-//   A も B も同じ「セル順」の並びになる。id (= meta.y) で元の index を追える。
-//
-// シミュレーションの意味 (力のモデル、friction、ポインタ、トーラス) は legacy/js-cpu の
-// simulation.js と同一。数値は f32 なので CPU 版 (f64 で計算して f32 に格納) と下位桁だけ違う。
+// Particle Life の GPU 版。A = 現在の状態 (描画も読む)、B = scatter でセル順に並べ替えた近傍ループ用のコピー (force は B -> A)
+// 物理は legacy/js-cpu の simulation.js と同じ (f32 なので下位桁だけ違う)
 
 import { createShaderModule, withErrorScope } from './device.js';
 import { PARAMS_FLOATS, PARAMS_STRUCT_FIELDS, assertParamsLayout } from './shaders/common.wgsl.js';
@@ -24,12 +10,12 @@ import {
 import { FORCE_WORKGROUP, forceWGSL, densityWGSL } from './shaders/force.wgsl.js';
 import { alloc, randomize as randomizeState } from '../particles.js';
 
-/** セル数の上限 (rMax が極端に小さいときのメモリ保護。GUI の範囲では到達しない)。 */
+/** rMax が極端に小さいときのメモリ保護 (GUI の範囲では到達しない)。 */
 const MAX_CELLS = 1 << 22;
-/** dispatch 次元の上限 65535 x workgroup size から決まるパーティクル数の上限。 */
+/** dispatch の上限 65535 x workgroup size。 */
 const MAX_PARTICLES = 65535 * FORCE_WORKGROUP;
 
-/** ペアごとの速度減衰 viscosity * accelScale * dt の上限 (これを超えると explicit な減衰が振動・発散する)。 */
+/** viscosity * accelScale * dt の上限 (超えると陽的な減衰が発散する)。 */
 const MAX_VISCOSITY_STEP = 0.01;
 
 const STORAGE = GPUBufferUsage.STORAGE;
@@ -52,10 +38,8 @@ export class GpuSimulation {
         this.device = device;
         this.count = 0;
         this.numTypes = 1;
-        /** ワールド: height = 1、width = キャンバスのアスペクト比。 */
         this.world = { width: 1, height: 1 };
 
-        // セルグリッド (configureGrid が決める)
         this.grid = { rMax: NaN, reachWanted: 0, width: NaN, height: NaN, nx: 3, ny: 3, nCells: 9, reach: 1, capacity: 0 };
 
         this.uniformData = new ArrayBuffer(PARAMS_FLOATS * 4);
@@ -67,14 +51,12 @@ export class GpuSimulation {
             usage: GPUBufferUsage.UNIFORM | COPY_DST,
         });
 
-        this.buffers = null;      // setCount で作る
-        this.cellBuffers = null;  // configureGrid で作る
-        this.rulesBuffer = null;  // setRules で作る
+        this.buffers = null;
+        this.cellBuffers = null;
+        this.rulesBuffer = null;
         this.bindGroups = null;
         this.rulesVersion = 0;
     }
-
-    // ------------------------------------------------------------------ pipelines
 
     async createPipelines() {
         const { device } = this;
@@ -100,9 +82,7 @@ export class GpuSimulation {
         });
     }
 
-    // ------------------------------------------------------------------ buffers
-
-    /** パーティクル数に依存するバッファを作り直す (中身は未初期化 = 0)。 */
+    /** パーティクル数に依存するバッファを作り直す (中身は 0)。 */
     setCount(n) {
         if (n > MAX_PARTICLES) throw new Error(`too many particles: ${n} > ${MAX_PARTICLES}`);
         const { device } = this;
@@ -113,20 +93,19 @@ export class GpuSimulation {
         this.buffers = {
             posVelA: mk('posVel A', m * 16),   // vec4f (x, y, vx, vy)
             metaA: mk('meta A', m * 8),        // vec2<u32> (type, id)
-            densityA: mk('density A', m * 4),  // f32 (重み付き近傍数。density パスが書く。デバッグの読み戻し用)
-            posTypeB: mk('posType B (cell-sorted)', m * 16),  // vec4f (x, y, type, pressure)
+            densityA: mk('density A', m * 4),  // f32 (デバッグの読み戻し用)
+            posTypeB: mk('posType B (cell-sorted)', m * 16),  // vec4f (x, y, type, 0)
             velIdB: mk('velId B (cell-sorted)', m * 16),      // vec4f (vx, vy, id, 0)
-            posTypeP: mk('posType + pressure (cell-sorted)', m * 16),  // vec4f (x, y, type, pressure)。density パスが書く
+            posTypeP: mk('posType + pressure (cell-sorted)', m * 16),  // vec4f (x, y, type, pressure)。圧力ありの force が読む
             slot: mk('particleSlot', m * 8),   // vec2<u32> (cell, セル内通し番号)
         };
         this.rebuildBindGroups();
     }
 
-    /** セルバッファ (numCellParticles / firstCellParticle) を nCells 個分確保する。 */
     allocCells(nCells) {
         const { device } = this;
         if (this.cellBuffers) for (const b of Object.values(this.cellBuffers)) b.destroy();
-        // 少し余裕を持たせて、ウィンドウリサイズで毎フレーム作り直さないようにする
+        // リサイズ中に毎フレーム作り直さないよう余裕を持たせる
         const capacity = Math.max(16, Math.ceil(nCells * 1.25));
         this.grid.capacity = capacity;
         const mk = (label, bytes) => device.createBuffer({ label, size: bytes, usage: STORAGE | COPY_SRC | COPY_DST });
@@ -137,7 +116,6 @@ export class GpuSimulation {
         this.rebuildBindGroups();
     }
 
-    /** ルール行列 (RuleMatrix) を GPU に上げる。numTypes が変わったらバッファも作り直す。 */
     setRules(rules) {
         const { device } = this;
         const bytes = Math.max(16, rules.data.byteLength);
@@ -176,12 +154,7 @@ export class GpuSimulation {
         }
     }
 
-    // ------------------------------------------------------------------ state upload
-
-    /**
-     * CPU 側の ParticleState (SoA) をそのまま GPU に上げる。id = 0..count-1 (元の index)。
-     * @param {import('../particles.js').ParticleState} state
-     */
+    /** @param {import('../particles.js').ParticleState} state  id = 0..count-1 で上げる */
     loadState(state) {
         const n = state.count;
         if (n !== this.count || !this.buffers) this.setCount(n);
@@ -203,7 +176,6 @@ export class GpuSimulation {
         }
     }
 
-    /** 一様ランダムな位置・速度 0・ランダムな type で初期化する (パーティクル数も指定)。 */
     randomize(count, numTypes, rng = Math.random) {
         const state = alloc(count);
         randomizeState(state, this.world, numTypes, rng);
@@ -211,7 +183,6 @@ export class GpuSimulation {
         this.loadState(state);
     }
 
-    /** 全パーティクルの type を振り直す (位置・速度・id はそのまま)。 */
     assignTypes(numTypes, rng = Math.random) {
         const n = this.count;
         this.numTypes = numTypes;
@@ -219,8 +190,7 @@ export class GpuSimulation {
         const { device } = this;
         const types = new Uint32Array(n);
         for (let i = 0; i < n; i++) types[i] = Math.min(numTypes - 1, Math.floor(rng() * numTypes));
-        // 同じ id の type が変わっても、type は i.i.d. なので「どのスロットに書くか」は無関係。
-        // meta は (type, id) が交互なので、小さな compute pass で .x だけ書き換える。
+        // type は i.i.d. なのでどのスロットに書いてもよい。meta の .x だけ compute で書き換える
         const scratch = device.createBuffer({ label: 'types scratch', size: n * 4, usage: STORAGE | COPY_DST });
         device.queue.writeBuffer(scratch, 0, types);
         this.runRetype(scratch);
@@ -248,7 +218,7 @@ export class GpuSimulation {
     }
 
     createRetypePipeline() {
-        // 一度しか使わない小さなシェーダなので、同期生成 (エラーは uncapturederror に出る)
+        // 一度しか使わないので同期生成 (エラーは uncapturederror に出る)
         const code = /* wgsl */`
 @group(0) @binding(0) var<storage, read> types: array<u32>;
 @group(0) @binding(1) var<storage, read_write> metaOut: array<vec2u>;
@@ -265,12 +235,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         });
     }
 
-    // ------------------------------------------------------------------ world / grid
-
-    /**
-     * ワールド幅を変える (キャンバスのリサイズ時)。既存のパーティクルは新しい範囲へ巻き戻す。
-     * グリッドは次の encode で追従する。
-     */
+    /** 既存のパーティクルは新しい範囲へ巻き戻す。グリッドは次の encode で追従する。 */
     setWorld(width, height = 1) {
         const w = Math.fround(width);
         if (w === this.world.width && height === this.world.height) return;
@@ -291,7 +256,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         device.queue.submit([enc.finish()]);
     }
 
-    /** wrap / retype のような単発パス用: world と count だけ最新にして uniform を上げる。 */
+    /** 単発パス (wrap / retype) 用に world と count だけ最新にして uniform を上げる。 */
     writeWorldUniforms() {
         this.uf32[FIELD.worldW] = this.world.width;
         this.uf32[FIELD.worldH] = this.world.height;
@@ -299,12 +264,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData);
     }
 
-    /**
-     * セル数を決める。セル幅 >= rMax / K (K = reach) にして、force は ±K セルを走査する。
-     * K = 1 は CPU 版 Grid.configure と同じ (1 軸あたり floor(サイズ / rMax) セル)。
-     * ±K セルが周期境界で回り込んでも重複しないよう、各軸 2K + 1 セル以上を必要とし、
-     * 足りなければ K を下げる (K = 1 でも足りなければ従来どおり 3 セルに切り上げる)。
-     */
+    /** セル幅 >= rMax / K。±K セルが回り込んで重複しないよう各軸 2K + 1 セル未満なら K を下げる。 */
     configureGrid(rMax, reachWanted = 1) {
         const g = this.grid;
         const { width, height } = this.world;
@@ -325,7 +285,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
             nx = Math.max(3, Math.floor(width / r));
             ny = Math.max(3, Math.floor(height / r));
             if (nx * ny <= MAX_CELLS) break;
-            r *= 1.25; // 上限を超えるときだけセルを大きくする (正確さは保たれ、遅くなるだけ)
+            r *= 1.25; // セルを大きくしても正確さは変わらない (遅くなるだけ)
         }
         g.rMax = rMax;
         g.reachWanted = reachWanted;
@@ -343,9 +303,6 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         }
     }
 
-    // ------------------------------------------------------------------ per-frame
-
-    /** params / pointer から uniform を組み立てて上げる。1 フレーム分 (全 substep 共通)。 */
     writeUniforms(params, pointer, dt) {
         const f = this.uf32;
         const u = this.uu32;
@@ -357,7 +314,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         f[FIELD.rMax2] = rMax * rMax;
         f[FIELD.invRMax] = 1 / rMax;
         f[FIELD.beta] = beta;
-        f[FIELD.invBeta] = beta > 0 ? 1 / beta : 0;      // beta == 0 では使われない (r < 0 は偽)
+        f[FIELD.invBeta] = beta > 0 ? 1 / beta : 0;      // beta == 0 では使われない
         f[FIELD.invOneMinusBeta] = 1 / (1 - beta);
         f[FIELD.accelScale] = rMax * params.forceFactor;
         f[FIELD.friction] = 0.5 ** (dt / Math.max(params.frictionHalfLife, 1e-6));
@@ -378,7 +335,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         f[FIELD.pointerY] = usePointer ? pointer.y : 0;
         f[FIELD.pointerR2] = pR * pR;
         f[FIELD.invPointerR] = pR > 0 ? 1 / pR : 0;
-        // forceFactor を掛けて、粒子間の力に対してポインタが弱くならないようにする (CPU 版と同じ)
+        // forceFactor を掛けて粒子間の力に負けないようにする (CPU 版と同じ)
         f[FIELD.pointerStrength] = usePointer ? pointer.mode * params.pointerStrength * params.forceFactor : 0;
 
         f[FIELD.rMax] = rMax;
@@ -386,7 +343,6 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         f[FIELD.maxSpeed] = params.limitSpeed ? Math.max(params.maxSpeed, 0) : 0;
         f[FIELD.restDensity] = params.restDensity;
         f[FIELD.pressureScale] = params.limitPressure ? 0.5 * Math.max(params.pressureStrength, 0) : 0;
-        // 圧縮中のペアの減衰。ペアごとの減衰係数 viscosity * accelScale * dt が大きすぎると発散するので上限を付ける
         f[FIELD.viscosity] = params.limitPressure
             ? Math.min(Math.max(params.viscosity, 0), MAX_VISCOSITY_STEP / (rMax * params.forceFactor * dt)) : 0;
         this.viscosityOn = f[FIELD.viscosity] > 0;
@@ -395,11 +351,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     }
 
     /**
-     * 1 フレーム分のシミュレーションを encoder に積む (CPU 読み戻しなし)。
+     * steps 回の substep を 1 つの compute pass に積む (steps = 0 でも計測用に空の pass を作る)。
      * @param {GPUCommandEncoder} encoder
      * @param {{params: object, pointer?: object, steps: number, dt?: number,
      *          timestampWrites?: GPUComputePassTimestampWrites}} opts
-     *   steps 回の substep を 1 つの compute pass にまとめる。steps = 0 でも (計測用に) 空の pass を作る。
      */
     encode(encoder, { params, pointer, steps, dt = params.dt, timestampWrites }) {
         if (!this.buffers || !this.rulesBuffer) throw new Error('GpuSimulation: setRules / setCount first');
@@ -417,38 +372,32 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         const { pipelines, bindGroups, count } = this;
         const particleGroups = ceilDiv(count, PARTICLE_WORKGROUP);
 
-        // 1. 個数を数える (+ セル内通し番号を保存)。個数は前ステップの scan が 0 に戻してある
+        // セルの個数は前ステップの scan が 0 に戻してある
         pass.setPipeline(pipelines.count);
         pass.setBindGroup(0, bindGroups.count);
         pass.dispatchWorkgroups(particleGroups);
-        // 2. 累積和 -> firstCellParticle (+ 個数を 0 に戻す)
         pass.setPipeline(pipelines.scan);
         pass.setBindGroup(0, bindGroups.scan);
         pass.dispatchWorkgroups(1);
-        // 3. セル順に並べ替え (A -> B)
         pass.setPipeline(pipelines.scatter);
         pass.setBindGroup(0, bindGroups.scatter);
         pass.dispatchWorkgroups(particleGroups);
-        // 4. 密度 -> 圧力 (圧縮の制限が有効なときだけ。力と同じ位置から作るので 1 ステップ遅れない)
+        // 圧力は force と同じステップの位置から作る (1 ステップ遅れると振動する)
         if (this.pressureOn) {
             pass.setPipeline(pipelines.density);
             pass.setBindGroup(0, bindGroups.density);
             pass.dispatchWorkgroups(ceilDiv(count, FORCE_WORKGROUP));
         }
-        // 5. 力の計算 + 積分 (B -> A)
         const force = !this.pressureOn ? 'force' : this.viscosityOn ? 'forcePV' : 'forceP';
         pass.setPipeline(pipelines[force]);
         pass.setBindGroup(0, bindGroups[force]);
         pass.dispatchWorkgroups(ceilDiv(count, FORCE_WORKGROUP));
     }
 
-    // ------------------------------------------------------------------ debug / test only
-
     /**
-     * 現在の状態 (バッファ A) を CPU に読み戻す。通常のフレームループでは使わない。
+     * デバッグ用。density は圧縮の制限が有効なときだけ更新される。
      * @returns {Promise<{count:number, x:Float32Array, y:Float32Array, vx:Float32Array, vy:Float32Array,
      *                    type:Uint32Array, id:Uint32Array, density:Float32Array}>}
-     *   density は density パスが走ったとき (圧縮の制限が有効) だけ更新される (それ以外は 0 / 古いまま)。
      */
     async readState() {
         const { device, count } = this;
@@ -493,7 +442,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         return out;
     }
 
-    /** デバッグ用: 直近の step で作られたセル配列 (firstCellParticle, nCells + 1 個) を読み戻す。 */
+    /** デバッグ用: 直近の step の firstCellParticle (nCells + 1 個)。 */
     async readFirstCellParticle() {
         const { device } = this;
         const bytes = (this.grid.nCells + 1) * 4;

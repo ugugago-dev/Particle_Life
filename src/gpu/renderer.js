@@ -1,37 +1,5 @@
-// WebGPU レンダラ。シミュレーションのストレージバッファ (バッファ A) を頂点シェーダから直接読んで
-// インスタンス描画する (CPU への読み戻しなし)。
-//
-//   resize(cssW, cssH, dpr) : バックバッファ = CSS サイズ x devicePixelRatio
-//   draw(encoder, sim, view, timer) : 1 フレーム分の render pass を encoder に積む
-//
-//   view = {
-//     palette:        { numTypes, css, rgb: Float32Array }    (palette.js)
-//     particleRadius: number                                  CSS px
-//     trails:         boolean                                 フェードさせながら重ね描き
-//     pointer:        { x, y, active, mode }                  ワールド座標、mode +1 引力 / -1 斥力
-//     pointerRadius:  number                                  ワールド単位
-//     rMax:           number                                  organic のスプラット / ぼかし半径 (x rMax) と密度の正規化
-//     organic:        { renderMode, organicStyle, fieldScale, splatRadius, fieldGain, blurSmall, blurLarge,
-//                       glowIntensity, bandFreq, bandBase, threshold, nucleusThreshold, coreThreshold, rimStrength,
-//                       speciesTint, showParticles }
-//                                                             config.js の Organic 項目。スタイルごとの違い (使うパス・
-//                                                             スタイル固有の項目) は organicStyles.js の表
-//   }
-//
-// トレイルなし: canvas に BG クリア -> パーティクル -> ポインタ円 を 1 パスで描く。
-// トレイルあり: 永続テクスチャ (rgba16float) を BG で薄くフェード -> パーティクルを重ね描き、
-//               そのあと canvas へ等倍コピー -> ポインタ円 (円はトレイルに残さない)。
-//
-// organic モード (docs/organic-rendering-spec.md): トレイルは無視して、不透明な全画面を描く。
-//   1. splat      : 粒子を field (rgba16float, canvas x fieldScale + 周囲に margin px の余白) に加算
-//                   (cell だけ顆粒テクスチャ r16float に MRT)。1 粒子 = 1 instance (4 頂点の strip)
-//   2. shape      : 余白に落ちた端のはみ出しを反対側へ折り返し (周期境界)、スタイルの shape
-//                   (occupancy / compress / nucleus) で 0..1 の指標に整形 (cell は顆粒も折り返す)
-//   3. downsample : ブラーの σ が大きいときだけ、1/2 ずつ縮小 (ピラミッド)
-//   4. blur       : small (disk) と large (ring) の分離ガウス (水平 -> 垂直)。それぞれ必要なら低解像度で
-//                   (large を使わないスタイルは large を作らない)
-//   5. composite  : スタイル (glass / cell / glow / bands / mono) で着色して canvas へ -> パーティクル (任意) -> ポインタ円
-//   (cell だけ: 画面固定のノイズを canvas 解像度のテクスチャに焼いておく。canvas のサイズ / dpr が変わったときだけ)
+// WebGPU レンダラ: シミュレーションのバッファ A を頂点シェーダから直接読んで描く。organic のパス構成は docs/organic-rendering-spec.md
+// view = { palette, particleRadius (CSS px), trails, pointer, pointerRadius (ワールド単位), rMax, organic (config.js の Organic 項目) }
 
 import { createShaderModule, withErrorScope } from './device.js';
 import {
@@ -45,18 +13,17 @@ import {
 import { ORGANIC_STYLES, SHAPE_INDEX } from '../organicStyles.js';
 
 const BG = { r: 1 / 255, g: 14 / 255, b: 29 / 255, a: 1 };   // style.css の --bg
-const TRAIL_FORMAT = 'rgba16float';  // 8bit だとフェードの丸めで残像が消えきらないため
-const FIELD_FORMAT = 'rgba16float';  // 加算ブレンド可能で、色 x 重みが 1 を超えても飽和しない (ぼかしの中間も同じ)
-const GRANULE_FORMAT = 'r16float';   // 顆粒 (cell の小器官)。1 チャンネルで足りる。16bit float は加算ブレンド可能
-const PAPER_FORMAT = 'rgba8unorm';   // cell の画面固定のノイズ (0..1 の 3 値)
-const TRAIL_FADE = 0.14;             // Canvas2D 版と同じ (小さいほど長く残る)
+const TRAIL_FORMAT = 'rgba16float';  // 8bit だとフェードの丸めで残像が消えきらない
+const FIELD_FORMAT = 'rgba16float';  // 加算しても 1 で飽和しない
+const GRANULE_FORMAT = 'r16float';
+const PAPER_FORMAT = 'rgba8unorm';
+const TRAIL_FADE = 0.14;             // Canvas2D 版と同じ
 
-const SIGMA_MAX_TEXELS = 5;          // 1 方向のぼかしの σ の上限 (テクセル)。超える分は解像度を 1/2 ずつ落として収める
-const MAX_BLUR_LEVEL = 6;            // 縮小の段数の上限 (1/64)
+const SIGMA_MAX_TEXELS = 5;          // これを超える σ は解像度を 1/2 ずつ落としてぼかす
+const MAX_BLUR_LEVEL = 6;
 
-// OrganicParams のフィールド位置 (organic.wgsl.js の ORGANIC_FIELDS の順)
 const OF = Object.fromEntries(ORGANIC_FIELDS.map((name, i) => [name, i]));
-// config.js の項目をそのままコピーするフィールド (同名)。残り (weightNorm, splatRadius, style, shape, dpr, fieldW, fieldH, margin) は計算して入れる
+// config.js から同名でコピーする項目 (残りは writeOrganicUniform で計算)
 const COPIED_PARAMS = ['fieldGain', 'glowIntensity', 'bandFreq', 'threshold', 'nucleusThreshold', 'speciesTint', 'bandBase', 'rimStrength', 'coreThreshold'];
 
 const ALPHA_BLEND = {
@@ -69,20 +36,15 @@ const ADDITIVE_BLEND = {
     alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
 };
 
-/** σ (field の px) のガウシアンを 1 方向 SIGMA_MAX_TEXELS 以下に収めるのに必要な縮小の段数 (1 段 = 1/2)。 */
+/** σ (px) を SIGMA_MAX_TEXELS 以下に収める縮小の段数。 */
 function blurLevel(sigmaPx) {
     const k = Math.ceil(Math.log2(Math.max(sigmaPx, 1e-3) / SIGMA_MAX_TEXELS));
     return Math.min(MAX_BLUR_LEVEL, Math.max(0, k));
 }
 
-/**
- * σ (テクセル) の離散ガウシアン (半径 3σ) を、バイリニアの「2 テクセルを 1 フェッチ」にまとめたタップ表にして
- * out[base...] (vec4 単位) に書く。out[base] = 中心 (offset 0, weight)、続く各 vec4 = 左右対称のペア (offset, weight)。
- * 隣り合う 2 テクセル i, i+1 (重み wa, wb) を、位置 (i*wa + (i+1)*wb) / (wa + wb) の 1 回のバイリニアで置き換える。
- * @returns {number} ペアの数 (フェッチ数は 1 + 2 * ペア数)
- */
-const TAP_WEIGHTS = new Float64Array(2 * BLUR_MAX_PAIRS + 1);   // writeGaussianTaps の作業用 (半径の上限 + 1)
+const TAP_WEIGHTS = new Float64Array(2 * BLUR_MAX_PAIRS + 1);
 
+/** 半径 3σ のガウシアンを、隣り合う 2 テクセルを 1 回のバイリニアにまとめたタップ表 (中心 + ペア) にして out に書き、ペア数を返す。 */
 function writeGaussianTaps(out, base, sigma) {
     const s = Math.max(sigma, 0.3);
     const radius = Math.min(Math.ceil(3 * s), 2 * BLUR_MAX_PAIRS);
@@ -108,7 +70,7 @@ function writeGaussianTaps(out, base, sigma) {
 export class GpuRenderer {
     /**
      * @param {GPUDevice} device
-     * @param {GPUCanvasContext} context  configureCanvas() 済み
+     * @param {GPUCanvasContext} context
      * @param {GPUTextureFormat} format
      * @param {HTMLCanvasElement} canvas
      */
@@ -145,10 +107,9 @@ export class GpuRenderer {
         this.needsTrailClear = true;
 
         this.particleGroup = null;
-        this.particleGroupKey = null; // [posVelA, metaA] が変わったら作り直す
+        this.particleGroupKey = null;
 
-        // OrganicParams (ORGANIC_FIELDS の順)。style / shape だけ u32 なので同じバッファの u32 ビューで書く。
-        // 値が変わったときだけアップロードする (前回送った値をビットで比較)
+        // style / shape だけ u32。前回送った値とビットで比べて、変わったときだけ送る
         this.organicData = new Float32Array(ORGANIC_UNIFORM_FLOATS);
         this.organicU32 = new Uint32Array(this.organicData.buffer);
         this.organicSent = new Uint32Array(ORGANIC_UNIFORM_FLOATS);
@@ -157,22 +118,21 @@ export class GpuRenderer {
             size: ORGANIC_UNIFORM_FLOATS * 4,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
-        // ブラーのパス (small / large x 水平 / 垂直) ごとに別のタップ表 (σ が変わったパスだけ書き直す)
         this.blurData = new Float32Array(BLUR_UNIFORM_FLOATS);
-        this.blurU32 = new Uint32Array(this.blurData.buffer);          // count (u32)
+        this.blurU32 = new Uint32Array(this.blurData.buffer);
         this.blurBuffers = Object.fromEntries(['smallH', 'smallV', 'largeH', 'largeV'].map((name) => [name, device.createBuffer({
             label: `organic blur ${name}`,
             size: BLUR_UNIFORM_FLOATS * 4,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         })]));
-        // ワールドは周期境界なので repeat (端のぼかしが反対側から回り込む。splat も端をまたぐ分を反対側に描く)
+        // 周期境界なので repeat
         this.fieldSampler = device.createSampler({
             magFilter: 'linear', minFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat',
         });
-        this.organicLayout = { fw: 0, fh: 0, margin: 0, sigmaSmall: 0, sigmaLarge: 0, ks: 0, kl: 0 };   // 毎フレーム更新 (updateOrganicLayout)
-        this.organicPlan = null;      // 中間テクスチャ・パス・バインドグループ (ensureOrganicPlan)
-        this.splatGroups = null;      // { plain, granule } (パイプラインごとに auto layout が別)
-        this.splatGroupKey = null;    // [posVelA, metaA]
+        this.organicLayout = { fw: 0, fh: 0, margin: 0, sigmaSmall: 0, sigmaLarge: 0, ks: 0, kl: 0 };
+        this.organicPlan = null;
+        this.splatGroups = null;      // auto layout はパイプラインごとに別なので plain / granule の 2 つ
+        this.splatGroupKey = null;
     }
 
     async createPipelines() {
@@ -196,9 +156,8 @@ export class GpuRenderer {
                 layout: 'auto',
                 vertex: { module: particle, entryPoint: 'vs' },
                 fragment: { module: particle, entryPoint: 'fs', targets: target(fmt, ALPHA_BLEND) },
-                primitive: { topology: 'triangle-strip' },    // 4 頂点の四角形 (quadCorner)
+                primitive: { topology: 'triangle-strip' },
             });
-            // 全画面三角形 + ブレンドなし (downsample / blur は field 形式へ、composite は canvas へ書き切る)
             const fullscreenPipeline = (label, module, fmt) => device.createRenderPipeline({
                 label,
                 layout: 'auto',
@@ -211,17 +170,15 @@ export class GpuRenderer {
                 layout: 'auto',
                 vertex: { module: splat, entryPoint: 'vs' },
                 fragment: { module: splat, entryPoint, targets },
-                primitive: { topology: 'triangle-strip' },    // 4 頂点の四角形 (quadCorner)
+                primitive: { topology: 'triangle-strip' },
             });
             this.pipelines = {
-                // field だけ (cell 以外) / field + 顆粒の MRT (cell)
                 splat: splatPipeline('organic splat', 'fs', [{ format: FIELD_FORMAT, blend: ADDITIVE_BLEND }]),
                 splatGranule: splatPipeline('organic splat + granule', 'fsGranule', [
                     { format: FIELD_FORMAT, blend: ADDITIVE_BLEND },
                     { format: GRANULE_FORMAT, blend: ADDITIVE_BLEND },
                 ]),
                 shape: fullscreenPipeline('organic shape', shape, FIELD_FORMAT),
-                // cell: 整形した field + 折り返した顆粒の MRT
                 shapeGranule: device.createRenderPipeline({
                     label: 'organic shape + granule',
                     layout: 'auto',
@@ -254,10 +211,9 @@ export class GpuRenderer {
                     layout: 'auto',
                     vertex: { module: pointer, entryPoint: 'vs' },
                     fragment: { module: pointer, entryPoint: 'fs', targets: target(format, ALPHA_BLEND) },
-                    primitive: { topology: 'triangle-strip' },    // 4 頂点の四角形 (quadCorner)
+                    primitive: { topology: 'triangle-strip' },
                 }),
             };
-            // uniform だけのバインドグループ (fade / pointer 用)
             const uniformOnly = (pipeline) => device.createBindGroup({
                 layout: pipeline.getBindGroupLayout(0),
                 entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }],
@@ -267,10 +223,9 @@ export class GpuRenderer {
         });
     }
 
-    /** バックバッファを CSS サイズ x dpr にする (ページ側 CSS が要素のレイアウトサイズを決める)。 */
+    /** バックバッファを CSS サイズ x dpr にする (テクスチャ上限を超えるときは比率を保って縮める)。 */
     resize(cssW, cssH, dpr) {
         this.dpr = dpr;
-        // 極端に大きい画面 x dpr がテクスチャ上限を超えないようにする (超えたら縮小。比率は保つ)
         const maxDim = this.device.limits.maxTextureDimension2D;
         const fit = Math.min(1, maxDim / (cssW * dpr), maxDim / (cssH * dpr));
         const w = Math.max(1, Math.floor(cssW * dpr * fit));
@@ -278,13 +233,10 @@ export class GpuRenderer {
         if (w === this.canvas.width && h === this.canvas.height) return;
         this.canvas.width = w;
         this.canvas.height = h;
-        this.needsTrailClear = true; // トレイルテクスチャは次の draw で作り直す
+        this.needsTrailClear = true;
     }
 
-    /**
-     * organic のスタイルと画面から、field の解像度とブラーの σ (field の px) / 縮小の段数を決める (this.organicLayout を更新)。
-     * large を使わないスタイルは kl = -1 (large のブラーを作らない)。
-     */
+    /** field の解像度・余白、ブラーの σ (field の px) と縮小段数を決める。large を使わないスタイルは kl = -1。 */
     updateOrganicLayout(org, style, rMax, worldH) {
         const { canvas, organicLayout: L } = this;
         L.fw = Math.max(1, Math.round(canvas.width * org.fieldScale));
@@ -294,19 +246,13 @@ export class GpuRenderer {
         L.sigmaLarge = Math.max(org.blurLarge * style.fine.large * rMax * pxPerWorld, 0.3);
         L.ks = blurLevel(L.sigmaSmall);
         L.kl = style.params.includes('blurLarge') ? blurLevel(L.sigmaLarge) : -1;
-        // splat の余白: スプラット半径 (px) + 1。field より大きいと 1 回の折り返しで足りないので field の大きさで頭打ち
-        // (以前の 4 コピー方式も 1 回分しかずらさなかったので同じ)
+        // 折り返しは 1 回分だけなので field の大きさで頭打ち
         const splatPx = org.splatRadius * style.fine.splat * rMax * pxPerWorld;
         L.margin = Math.min(Math.ceil(splatPx) + 1, L.fw, L.fh);
         return L;
     }
 
-    /**
-     * organic の中間テクスチャとパス (整形 / 縮小 / ブラー / 合成) の計画を、field サイズ・ブラーの縮小段数・
-     * スタイルが使うもの (large / 顆粒 / 紙のノイズ) が変わったときだけ作り直す。リサイズ・fieldScale・ブラー半径・スタイルの変更で呼ばれる。
-     * 紙のノイズ (cell) は canvas の px で決まるので、使うときは canvas のサイズと dpr も比べる。
-     * @returns {object} plan
-     */
+    /** 中間テクスチャ・パス・バインドグループ (plan) を、layout かスタイルの使うもの (紙のノイズなら canvas と dpr も) が変わったときだけ作り直す。 */
     ensureOrganicPlan(L, style) {
         const p = this.organicPlan;
         const { canvas, dpr } = this;
@@ -340,18 +286,15 @@ export class GpuRenderer {
             return { view: texture.createView(), w, h };
         };
 
-        // field: splat の出力 (密度そのもの、周囲に margin px の余白)。levels[0]: それを折り返して shape で整形したもの (余白なし)。
-        // 解像度ピラミッド: levels[k] = levels[0] の 1/2^k (偶数でなければ切り上げ)。ブラーは levels から読む
+        // field は余白付き、levels[0] (shape の出力) 以降は余白なし。levels[k] = 1/2^k
         const field = make('field', fw + 2 * margin, fh + 2 * margin);
         const levels = [make('shaped', fw, fh)];
         for (let k = 1; k <= Math.max(ks, kl); k++) {
             const prev = levels[k - 1];
             levels.push(make(`level ${k}`, Math.max(1, Math.ceil(prev.w / 2)), Math.max(1, Math.ceil(prev.h / 2))));
         }
-        // 顆粒 (cell): splat が余白付きの granuleRaw に書き、shape が折り返して余白なしの granule にする
         const granuleRaw = granules ? make('granule (padded)', fw + 2 * margin, fh + 2 * margin, GRANULE_FORMAT) : null;
         const granule = granules ? make('granule', fw, fh, GRANULE_FORMAT) : null;
-        // 紙のノイズ (cell): canvas 解像度。焼くのは作った直後の 1 回だけ (drawOrganic が paperDirty を見る)
         const paperTex = paper ? make('paper', canvas.width, canvas.height, PAPER_FORMAT) : null;
         const paperGroup = paper ? device.createBindGroup({
             layout: pipelines.paper.getBindGroupLayout(0),
@@ -359,7 +302,7 @@ export class GpuRenderer {
         }) : null;
 
         const shapePipeline = granules ? pipelines.shapeGranule : pipelines.shape;
-        const passes = [{    // 実行順。どれも全画面三角形 (draw(3))、書き込み先は target (+ extraTarget)
+        const passes = [{    // 実行順の全画面パス
             label: 'organic shape',
             pipeline: shapePipeline,
             target: levels[0].view,
@@ -384,8 +327,7 @@ export class GpuRenderer {
                 }),
             });
         }
-        // ブラー: level k で 水平 (src -> tmp) -> 垂直 (tmp -> out)
-        const blurs = [];    // passes の部分集合。タップ表の更新用 (branch, axis, w, h, 前回の σ)
+        const blurs = [];    // タップ表の更新用 (passes の部分集合)
         const blurPair = (branch, k) => {
             const lv = levels[k];
             const tmp = make(`${branch} blur tmp`, lv.w, lv.h);
@@ -413,7 +355,7 @@ export class GpuRenderer {
             return out;
         };
         const small = blurPair('small', ks);
-        const large = kl >= 0 ? blurPair('large', kl) : small;    // large を使わないスタイルは small を入れておく (読まれない)
+        const large = kl >= 0 ? blurPair('large', kl) : small;    // 使わないスタイルでは読まれない
 
         const compositeGroup = device.createBindGroup({
             layout: pipelines.composite.getBindGroupLayout(0),
@@ -423,8 +365,8 @@ export class GpuRenderer {
                 { binding: 2, resource: this.fieldSampler },
                 { binding: 3, resource: small.view },
                 { binding: 4, resource: large.view },
-                { binding: 5, resource: (granule ?? small).view },    // 顆粒は cell だけ (ほかは読まれない)
-                { binding: 6, resource: (paperTex ?? small).view },   // 紙のノイズも cell だけ
+                { binding: 5, resource: (granule ?? small).view },    // cell 以外では読まれない
+                { binding: 6, resource: (paperTex ?? small).view },
             ],
         });
 
@@ -492,7 +434,6 @@ export class GpuRenderer {
         if (this.particleGroupKey && this.particleGroupKey[0] === posVelA && this.particleGroupKey[1] === metaA) return;
         this.particleGroupKey = [posVelA, metaA];
         this.particleGroup = {
-            // パイプラインごとに auto layout が別物なので、両方分作る
             canvas: this.makeParticleGroup(this.pipelines.particleToCanvas, posVelA, metaA),
             trail: this.makeParticleGroup(this.pipelines.particleToTrail, posVelA, metaA),
         };
@@ -522,7 +463,6 @@ export class GpuRenderer {
         const pointer = view.pointer;
         const pointerOn = !!pointer && pointer.active;
 
-        // ---- uniform
         const u = this.uniformData;
         u[0] = world.width; u[1] = world.height;
         u[2] = canvas.width; u[3] = canvas.height;
@@ -537,8 +477,7 @@ export class GpuRenderer {
         const count = sim.count;
         const org = view.organic;
         const organic = org?.renderMode === 'organic' && count > 0;
-        // organic のとき粒子は「中の小器官」として半径半分・薄く重ねる (showParticles)
-        if (organic) {
+        if (organic) {    // showParticles の重ね描きは半径半分・薄く
             u[4] *= 0.5;
             u[11] = 0.3;
         }
@@ -551,7 +490,6 @@ export class GpuRenderer {
         const bgClear = { r: BG.r, g: BG.g, b: BG.b, a: 1 };
 
         if (organic) {
-            // organic はトレイルを使わない (不透明な全画面)。次にトレイルを有効にしたときは BG から始める
             this.drawOrganic(encoder, sim, view, canvasView, { dots: !!org.showParticles, pointerOn, timer });
             this.needsTrailClear = true;
             return;
@@ -566,11 +504,11 @@ export class GpuRenderer {
             this.drawParticles(pass, pipelines.particleToCanvas, this.particleGroup.canvas, count);
             if (pointerOn) this.drawPointer(pass);
             pass.end();
-            this.needsTrailClear = true; // 次にトレイルを有効にしたときは BG から始める
+            this.needsTrailClear = true;
             return;
         }
 
-        // ---- トレイル: 永続テクスチャへ
+        // トレイル: 永続テクスチャをフェードして重ね描き -> canvas へコピー (ポインタ円はトレイルに残さない)
         this.ensureTrailTexture();
         const clear = this.needsTrailClear;
         this.needsTrailClear = false;
@@ -592,7 +530,6 @@ export class GpuRenderer {
         this.drawParticles(trailPass, pipelines.particleToTrail, this.particleGroup.trail, count);
         trailPass.end();
 
-        // ---- canvas へコピー + ポインタ円
         const finalPass = encoder.beginRenderPass({
             label: 'present',
             colorAttachments: [{ view: canvasView, loadOp: 'clear', clearValue: bgClear, storeOp: 'store' }],
@@ -605,7 +542,6 @@ export class GpuRenderer {
         finalPass.end();
     }
 
-    /** organic: splat -> shape -> (縮小) -> ブラー -> 合成 を encoder に積む。canvas は不透明に塗り切る。 */
     drawOrganic(encoder, sim, view, canvasView, { dots, pointerOn, timer }) {
         const { pipelines } = this;
         const org = view.organic;
@@ -617,8 +553,7 @@ export class GpuRenderer {
         this.writeBlurUniforms(plan, layout);
         this.updateSplatGroup(sim);
 
-        // 0. 紙のノイズ (cell): plan を作り直した直後だけ焼く (uniform の dpr は上の writeOrganicUniform が書いた)
-        if (plan.paperDirty) {
+        if (plan.paperDirty) {    // 紙のノイズは plan を作り直した直後だけ焼く
             const pass = encoder.beginRenderPass({
                 label: 'organic paper',
                 colorAttachments: [{ view: plan.paperView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' }],
@@ -630,7 +565,6 @@ export class GpuRenderer {
             plan.paperDirty = false;
         }
 
-        // 1. splat: 余白付きの field (色 x w, w)。cell は顆粒も同時に (MRT)。instance = 粒子 (周期境界は shape で折り返す)
         const clear = { r: 0, g: 0, b: 0, a: 0 };
         const colorAttachments = [{ view: plan.fieldView, clearValue: clear, loadOp: 'clear', storeOp: 'store' }];
         if (plan.granuleView) colorAttachments.push({ view: plan.granuleView, clearValue: clear, loadOp: 'clear', storeOp: 'store' });
@@ -644,7 +578,6 @@ export class GpuRenderer {
         splatPass.draw(4, count);
         splatPass.end();
 
-        // 2-3. 整形 + 縮小 + ブラー (全画面三角形、書き切るので clear)
         for (const p of plan.passes) {
             const colorAttachments = [{ view: p.target, clearValue: clear, loadOp: 'clear', storeOp: 'store' }];
             if (p.extraTarget) colorAttachments.push({ view: p.extraTarget, clearValue: clear, loadOp: 'clear', storeOp: 'store' });
@@ -655,7 +588,6 @@ export class GpuRenderer {
             pass.end();
         }
 
-        // 4. 合成 (+ 粒子の重ね描き + ポインタ円)
         const pass = encoder.beginRenderPass({
             label: 'organic composite',
             colorAttachments: [{ view: canvasView, clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
@@ -673,13 +605,7 @@ export class GpuRenderer {
         const f = this.organicData;
         const u = this.organicU32;
         const world = sim.world;
-        // field の正規化: 画面全体の平均密度のとき field = 1 (粒子数・画面サイズ・rMax に依存しない)。
-        // 密度 ρ (重み付き近傍数 Σ(1 - r/rMax)^2) の一様な場は、粒子数密度 n = 6ρ / (π rMax^2)。
-        // カーネル (1 - d^2)^3 の面積は π s^2 / 4 (s = スプラット半径) なので、粒子 1 個の重み w で
-        // field = w * n * π s^2 / 4 = 1.5 * w * ρ * (s / rMax)^2。ρ = 平均密度 = N π rMax^2 / (6 A) のとき field = 1。
-        // 既定の設定での実測 (60,000 粒子、16:9): 粒子ごとの密度は二峰性で、ガス (小さな塊) は平均の ~0.4 倍、構造は 4〜11 倍。
-        // field (スプラット 0.5 rMax) ではガスの塊が ~0.5〜2、構造の芯が 5〜25 (docs/organic-rendering-spec.md の「実測した密度」)。
-        // 平均密度の下限 0.5: 粒子がほとんど無いときに重みが発散しないように (通常の画面は ~10 以上なので影響しない)。
+        // 平均密度のとき field = 1 になる重み (導出は仕様書の「正規化」)。下限 0.5 は粒子がほぼ無いときの発散よけ
         const meanDensity = Math.max(sim.count / (world.width * world.height) * Math.PI * rMax * rMax / 6, 0.5);
         const splatRadius = org.splatRadius * style.fine.splat;
         f[OF.weightNorm] = 1 / Math.max(1.5 * meanDensity * splatRadius * splatRadius, 1e-3);
@@ -702,7 +628,7 @@ export class GpuRenderer {
         }
     }
 
-    /** ブラーのパスごとのタップ表。σ は field の px で持っていて、そのパスの解像度のテクセルに換算する。変わったパスだけ書き直す。 */
+    /** σ が変わったブラーのパスだけタップ表を書き直す。 */
     writeBlurUniforms(plan, layout) {
         const d = this.blurData;
         for (const b of plan.blurs) {

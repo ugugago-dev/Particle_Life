@@ -1,19 +1,13 @@
-// Pointer (mouse + touch) -> a single pointer object in WORLD coordinates.
-//   left drag / touch : attract (mode +1)
-//   right drag / shift+drag : repel (mode -1)
-// Listeners are attached to the canvas only, so GUI and overlay panels (separate
-// DOM siblings) never reach them; pointer capture keeps a drag alive past the edge.
+// Pointer in world coordinates: left drag / touch attracts, right drag / shift+drag repels (canvas only, so the GUI never triggers it)
 
 /**
  * @param {HTMLCanvasElement} canvas
- * @returns {{pointer: {x:number, y:number, active:boolean, mode:number}, dispose: () => void}}
- *   `pointer` is mutated in place, so the reference can be held by the sim and renderer.
+ * @returns {{pointer: {x:number, y:number, active:boolean, mode:number}, dispose: () => void}} pointer is mutated in place
  */
 export function createInput(canvas) {
     const pointer = { x: 0, y: 0, active: false, mode: 1 };
     let activeId = null;
 
-    // screen px -> world units: world height is 1, so divide by the CSS height
     function updatePosition(e) {
         const rect = canvas.getBoundingClientRect();
         const x = (e.clientX - rect.left) / rect.height;
