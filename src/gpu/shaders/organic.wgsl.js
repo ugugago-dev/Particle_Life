@@ -15,7 +15,7 @@ import { ORGANIC_STYLES, SHAPE_INDEX } from '../../organicStyles.js';
 // スタイル用の項目は config.js の項目名と同じ (renderer.js がそのままコピーする)。style だけ u32、ほかは f32。
 export const ORGANIC_FIELDS = [
     'weightNorm', 'splatRadius', 'fieldGain', 'style', 'shape', 'glowIntensity', 'bandFreq', 'threshold',
-    'nucleusThreshold', 'speciesTint', 'dpr', 'bandBase', 'rimStrength',
+    'nucleusThreshold', 'speciesTint', 'dpr', 'bandBase', 'rimStrength', 'coreThreshold',
 ];
 export const ORGANIC_UNIFORM_FLOATS = ORGANIC_FIELDS.length;
 
@@ -40,11 +40,12 @@ struct OrganicParams {
   glowIntensity: f32,     // glow: 輪郭の明るさ
   bandFreq: f32,          // bands: 縞の周波数
   threshold: f32,         // 密度のしきい値 (平均密度の倍率): これ未満は「空き」(ガス) として切り捨てる (shape = occupancy)
-  nucleusThreshold: f32,  // cell: 核が始まる大きなぼかしの占有度 (0..1) / glass: 核の指標のしきい値 (圧縮した密度、0..1)
+  nucleusThreshold: f32,  // cell: 核が始まる大きなぼかしの占有度 (0..1)
   speciesTint: f32,       // 種類の色をどれだけ混ぜるか
   dpr: f32,               // 紙の目・線の太さを CSS px で決めるため
   bandBase: f32,          // bands: 密度 0 (空き) の r。freq * base^3 が空きの位相
   rimStrength: f32,       // glass: 膜の線の太さ・濃さ
+  coreThreshold: f32,     // glass: 核の指標のしきい値 (圧縮した密度、0..1)
 };
 
 ${STYLE_CONSTS}
@@ -166,24 +167,29 @@ fn fsGranule(in: VSOut) -> GranuleOut {
 }
 `;
 
-// field (密度、平均 = 1。構造の芯は平均の数倍〜10 倍) を、ぼかす前にスタイルの shape へ整形する。
+// field (密度、平均 = 1。既定の設定での実測: ガス (数個〜十数個の粒の小さな塊) は ~0.5〜3.5、構造の芯は 5〜30 倍。
+// 値はスプラット半径が小さいほど尖る) を、ぼかす前にスタイルの shape へ整形する。
 // 出力は splat と同じ形式 (rgb = 平均色 x c, a = c) なので、あとのぼかし・縮小はそのまま使える。
 //   SHAPE_OCCUPANCY (glow / mono / cell) : c = 占有度 = 1 - exp(-SHARP * max(密度 - しきい値, 0))。ガスは 0、構造の内部は ~1。
 //                        SmoothLife の「場の値 (0 か 1 に近い)」に当たる。これを小 / 大のぼかしにかけて disk / ring の平均にする
-//   SHAPE_COMPRESS (bands) : c = 密度を滑らかに圧縮したもの (芯でも飽和せず縞が続く)
-//   SHAPE_NUCLEUS (glass)  : c = 圧縮した密度が nucleusThreshold を超えた所 = 核の指標 (0 か 1 に近い)。体・核・膜はすべてこのぼかしから作る
+//   SHAPE_COMPRESS (bands) : c = 密度を滑らかに圧縮したもの (ガスの塊はほぼ 0 のまま、構造の縁で立ち上がって芯で飽和)
+//   SHAPE_NUCLEUS (glass)  : c = 圧縮した密度が coreThreshold を超えた所 = 核の指標 (0 か 1 に近い)。体・核・膜はすべてこのぼかしから作る
 export const shapeWGSL = ORGANIC_SHARED + FULLSCREEN_VS + /* wgsl */`
 @group(0) @binding(0) var<uniform> O: OrganicParams;
 @group(0) @binding(1) var src: texture_2d<f32>;
 
 const OCC_SHARP = 2.0;
-// 圧縮: 密度 v (平均 = 1、芯は 5〜20 倍) を 0..1 に: 1 - exp(-(v / COMPRESS_S)^COMPRESS_P)。
-// 低密度 (ガス) はほぼ 0 のまま、中密度で立ち上がり、芯では飽和する (ぼかす前に飽和させるので、芯の粒子ノイズが縞に乗らない)
-const COMPRESS_S = 3.5;
-const COMPRESS_P = 1.8;
+// 圧縮: 密度 v (平均 = 1) を 0..1 に: 1 - exp(-(v / s)^p)。ぼかす前に飽和させるので、芯の粒子ノイズが縞に乗らない。
+//   glass (nucleus) : s = 3.5, p = 1.8。coreThreshold (既定 0.8 = v ~4.6) で切るための目盛り
+//   bands (compress): s = 6, p = 2.5。スプラットが 0.3 rMax のときの実測で、ガスの塊 (v ≦ ~3.5) は c ≦ 0.2 (空きの青のレリーフ)、
+//                     構造 (v 中央値 ~9) で ~0.9 に飽和する。s = 3.5 だとガスの塊がすべて黄〜赤の点になっていた
+const NUCLEUS_S = 3.5;
+const NUCLEUS_P = 1.8;
+const BANDS_S = 6.0;
+const BANDS_P = 2.5;
 
-fn compress(v: f32) -> f32 {
-  return 1.0 - exp(-pow(v / COMPRESS_S, COMPRESS_P));
+fn compress(v: f32, s: f32, p: f32) -> f32 {
+  return 1.0 - exp(-pow(v / s, p));
 }
 
 @fragment
@@ -192,8 +198,8 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
   let v = f.a * O.fieldGain;
   var c: f32;
   switch (O.shape) {
-    case SHAPE_COMPRESS: { c = compress(v); }
-    case SHAPE_NUCLEUS: { c = smoothstep(O.nucleusThreshold - 0.1, O.nucleusThreshold + 0.1, compress(v)); }
+    case SHAPE_COMPRESS: { c = compress(v, BANDS_S, BANDS_P); }
+    case SHAPE_NUCLEUS: { c = smoothstep(O.coreThreshold - 0.1, O.coreThreshold + 0.1, compress(v, NUCLEUS_S, NUCLEUS_P)); }
     case SHAPE_OCCUPANCY, default: { c = 1.0 - exp(-OCC_SHARP * max(v - O.threshold, 0.0)); }
   }
   return vec4f(meanColor(f) * c, c);

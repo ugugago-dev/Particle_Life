@@ -33,8 +33,28 @@
 
 - 密度 ρ = 重み付き近傍数 `Σ(1 - r/rMax)^2` の一様な場の粒子数密度は `n = 6ρ / (π rMax^2)`、カーネルの面積は `π s^2 / 4` (`s = splatRadius * rMax`)。よって `field = w * n * π s^2 / 4 = 1.5 * w * ρ * splatRadius^2`。
 - 平均密度 `ρ_mean = N π rMax^2 / (6 A)` (A = 世界の面積 = アスペクト比 x 1)。
-- 圧縮の制限が弱いと構造の芯は平均の数倍〜10 倍 (実測 3〜12 倍) になる。なので `restDensity` は基準にしない。芯の高さは `fieldGain` と shape の飽和曲線で受ける。
+- 圧縮の制限が弱いと構造の芯は平均の 5〜30 倍になる (下の「実測した密度」)。なので `restDensity` は基準にしない。芯の高さは `fieldGain` と shape の飽和曲線で受ける。
 - ブラー半径・スプラット半径は `rMax` の倍率 (ワールド単位) で持ち、field の px へは `fh / world.height` で換算するので、画面サイズ・DPR に依存しない。
+
+## 実測した密度 (しきい値の根拠)
+
+既定の設定 (60,000 粒子、rMax 0.03、restDensity 20、pressureStrength 0.005、16:9) で、ランダムなルール 4 通りを 1500 ステップ (15 秒) 回して測った
+(field は 960x540 = fieldScale 0.5 の 1920x1080 相当。ρ_mean ≈ 15.9)。
+
+- 粒子ごとの密度 ρ / ρ_mean は**二峰性**: ガスの山 ~0.35〜0.5 倍 (5〜8 個の小さな粒の塊。dots で散らばって見える点)、構造の山 4〜11 倍、谷は ~1〜1.4 倍。
+  圧縮の制限は弱く (restDensity 20 ≈ 1.26 倍を超えても押し返しが小さい)、芯は 10〜30 倍まで詰まる。
+- 粒子の位置での field の値 (ガスの粒子 = ρ < 1 倍、構造の粒子 = ρ > 1.5 倍):
+
+| スプラット (x rMax) | 使うスタイル | ガス 中央値 / 90% / 99% | 構造 1% / 10% / 中央値 | 二つを分ける最適なしきい値 (誤分類) |
+|---|---|---|---|---|
+| 0.5 | cell / glow / mono | 0.6〜0.9 / 1.1〜1.5 / 1.6〜2.0 | 1.6〜2.3 / 2.9〜4.3 / 6.7〜12.6 | 1.8〜2.1 (0.4〜1.7%) |
+| 0.3 | bands | 0.8〜1.4 / 1.5〜2.5 / 2.4〜3.6 | 1.6〜2.6 / 3.5〜5.1 / 8〜15 | 2.6〜3.3 (1.4〜5%) |
+| 0.15 | glass | 1.7〜2.4 / 2.9〜4.3 / 4.5〜6.6 | 2.1〜3.3 / 4.5〜7.2 / 10〜19 | 4.1〜5.1 (2.4〜8.7%) |
+
+- 画面の面積の 50〜70% は field < 0.3 (粒子の無い所)。ガスは一様な薄い場ではなく、小さな塊が点々と並んだもの。
+  以前の `threshold 0.6` はガスの塊をほぼすべて通していた (glow / mono / cell が点だらけ、cell の核が肥大)。
+- この測定から: `threshold` 1.5 (ガスの粒子の ~90% を落とし、構造の縁の細い膜 (粒の鎖の弧) は一部残す。2.0 だと膜も消える)、
+  glass の `coreThreshold` 0.8 (圧縮後。field ~4.6 = 細かい場でのガスの 90〜99% 点)、bands の圧縮曲線 s = 6, p = 2.5、cell の `nucleusThreshold` 0.7。
 
 ## スタイル表 (`src/organicStyles.js`)
 
@@ -53,8 +73,8 @@
 `v = field.a * fieldGain` (平均密度 = 1) として、スタイルの `shape` ごとに:
 
 - occupancy (glow / mono / cell): `c = 1 - exp(-2 * max(v - threshold, 0))`。空き (ガス) は 0、構造の内部は ~1 の「占有度」。SmoothLife の場の値 (0 か 1 に近い) に当たる。これを small / large でぼかしたものが disk 平均 m、ring 平均 n。
-- compress (bands): `c = 1 - exp(-(v / 3.5)^1.8)`。密度を 0..1 に圧縮 (ガスはほぼ 0、中密度で立ち上がり、芯 (v > ~8) で飽和)。ぼかす前に飽和させるので、芯の粒子ノイズが縞に乗らない。st1 の質量 r に当たる。
-- nucleus (glass): 上と同じ圧縮 `c0` のあと `c = smoothstep(nucleusThreshold - 0.1, nucleusThreshold + 0.1, c0)`。「核 (密度が高い所) の指標」で、ガスも疎な粒の殻も 0。体・核・膜はすべてこの指標のぼかしから作る。
+- compress (bands): `c = 1 - exp(-(v / 6)^2.5)`。密度を 0..1 に圧縮 (ガスの塊 (v ≦ ~3.5) は c ≦ 0.2 で空きの青のレリーフ、構造の縁で立ち上がり、芯 (v > ~10) で飽和)。以前の `(v / 3.5)^1.8` はガスの塊を黄〜赤の点にしていた。ぼかす前に飽和させるので、芯の粒子ノイズが縞に乗らない。st1 の質量 r に当たる。
+- nucleus (glass): 圧縮 `c0 = 1 - exp(-(v / 3.5)^1.8)` のあと `c = smoothstep(coreThreshold - 0.1, coreThreshold + 0.1, c0)`。「核 (密度が高い所) の指標」で、ガスも疎な粒の殻も 0。体・核・膜はすべてこの指標のぼかしから作る。
 
 出力は `(field.rgb / field.a * c, c)`。ぼかし後の `rgb / a` が加重平均色 (種類の色)。
 
@@ -116,21 +136,24 @@ st3 の式そのまま: `glow = max((1-n)^2 - (1-m)^2, 0) * 4 * glowIntensity`�
 | `blurSmall` | 0.15 | 0.05〜1.5 | small (disk) ぼかしの σ (x rMax) |
 | `blurLarge` | 0.45 | 0.3〜4 | large (ring) ぼかしの σ (x rMax)。広いときは低解像度で計算。bands は使わない |
 | `speciesTint` | 0.3 | 0〜1 | 種類の色をスタイルの色へ混ぜる量 (bands は半分の強さ、glass は使わない: 種類の色は核だけ) |
-| `threshold` | 0.6 | 0.05〜4 | cell / glow / mono: 平均密度の何倍未満を「空き」とするか |
+| `threshold` | 1.5 | 0.05〜4 | cell / glow / mono: 平均密度の何倍未満を「空き」とするか |
 | `glowIntensity` | 1 | 0〜3 | glow: 輪郭の明るさ |
 | `bandFreq` | 25 | 1〜100 | bands: 縞の周波数 (位相 = `bandFreq * r^3`) |
 | `bandBase` | 0.24 | 0.05〜0.6 | bands: 空き (密度 0) の r。`bandFreq * bandBase^3 ≈ 0.35` で st1 と同じ明るい青 |
-| `nucleusThreshold` | 0.75 | 0.3〜0.99 | cell: 核が始まる large ぼかしの占有度。glass: 核 (種類の色の平らな塊) が始まる密度 (圧縮後、0..1。shape の指標のしきい値) |
+| `nucleusThreshold` | 0.7 | 0.3〜0.99 | cell: 核が始まる large ぼかしの占有度 |
+| `coreThreshold` | 0.8 | 0.3〜0.99 | glass: 核 (種類の色の平らな塊) が始まる密度 (圧縮後、0..1。shape の指標のしきい値)。以前は `nucleusThreshold` と共用だったが、意味も最適値も違うので分けた |
 | `rimStrength` | 1.3 | 0〜2 | glass: 膜の線の太さ・濃さ |
 | `showParticles` | false | | 粒子 (半径半分、alpha 0.3) を上に重ねる |
 
 以前の `edge` / `coreBoost` / `stretch` と、旧 `threshold` (メタボールのしきい値) は廃止。`threshold` は上記の意味に変わった。
+しきい値の既定は「実測した密度」の節の測定から決めた。粒子数・rMax・圧縮の制限を大きく変えて密度の分布が変わったら、同じ手順で測り直す。
 
 ## 調整のコツ (目で見て決める所)
 
 - 構造の大きさは rMax 基準 (実測: 1 つの塊の半径がおよそ 0.5〜1 rMax)。輪郭が太すぎる / 細すぎるときは `blurLarge` と `splatRadius` を同じ向きに動かす。glow は large の σ が塊の半径に近いと塊全体が光り、半径より小さいと縁だけ光る。
 - cell の核は `blurLarge` が大きいほど出にくい (n が下がる)。`nucleusThreshold` を下げるか `blurLarge` を下げる。
-- ガスが見えすぎる / 構造が痩せるときは `threshold`。
+- ガスが見えすぎる / 構造が痩せるときは `threshold` (1.2〜2.0 が実用範囲。2.0 でガスはほぼ消えるが細い膜も消える)。
+- glass で小さな粒が白い縁の欠片として出るときは `coreThreshold` を上げる (0.85 以上では小さな本物の核も消え始める)。
 - bands の縞が細かすぎる (ノイズに見える) ときは `bandFreq` を下げる。空きの青を変えたいときは `bandBase` (位相 `bandFreq * bandBase^3`: 0.35 = 水色、0.8 = 黄緑〜黄、1〜2 = 赤)。芯の色 (飽和したときの位相) は `bandFreq` で動く。
 
 ## パレット (`src/palette.js`)
@@ -145,7 +168,7 @@ st3 の式そのまま: `glow = max((1-n)^2 - (1-m)^2, 0) * 4 * glowIntensity`�
 ## 実装メモ
 
 - `src/organicStyles.js`: スタイル表 (上記)。
-- `src/gpu/shaders/organic.wgsl.js`: `splatWGSL` / `shapeWGSL` / `downsampleWGSL` / `blurWGSL` / `compositeWGSL`。`OrganicParams` は 13 個の 4 バイト値 (52 バイト。style / shape だけ u32)。フィールド名は config.js の項目名と同じで、JS 側の `ORGANIC_FIELDS` と WGSL の struct の一致は起動時に `assertOrganicLayout` (common.wgsl.js の `assertStructLayout`) が確認する。`BlurParams` は 288 バイト。全画面三角形の頂点シェーダ `FULLSCREEN_VS` は render.wgsl.js のものを fade / blit / organic で共有する。
+- `src/gpu/shaders/organic.wgsl.js`: `splatWGSL` / `shapeWGSL` / `downsampleWGSL` / `blurWGSL` / `compositeWGSL`。`OrganicParams` は 14 個の 4 バイト値 (56 バイト。style / shape だけ u32)。フィールド名は config.js の項目名と同じで、JS 側の `ORGANIC_FIELDS` と WGSL の struct の一致は起動時に `assertOrganicLayout` (common.wgsl.js の `assertStructLayout`) が確認する。`BlurParams` は 288 バイト。全画面三角形の頂点シェーダ `FULLSCREEN_VS` は render.wgsl.js のものを fade / blit / organic で共有する。
 - `src/gpu/renderer.js`: `updateOrganicLayout` (field の解像度・σ・縮小段数)、`ensureOrganicPlan` / `buildOrganicPlan` (テクスチャ・パス・バインドグループ)、`drawOrganic`、`writeOrganicUniform` (変わったときだけアップロード)、`writeBlurUniforms`、`writeGaussianTaps`。
 - `trails` は organic では無視 (dots に戻したときは従来どおり)。`densityA` は読まない (simulation.js の `needDensity` も無くした。density パスは圧縮の制限が有効なときだけ走る)。
 - 性能の目安 (60,000 粒子、1920x1080、fieldScale 0.5、Intel UHD (内蔵 GPU)、描画 GPU 時間): glass ≈ 4.3 ms、bands ≈ 4.7 ms、cell ≈ 11 ms (ノイズが重い)、glow / mono ≈ 7.3 ms。dots は 0.5 ms。

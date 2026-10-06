@@ -12,7 +12,7 @@
 //     pointerRadius:  number                                  ワールド単位
 //     rMax:           number                                  organic のスプラット / ぼかし半径 (x rMax) と密度の正規化
 //     organic:        { renderMode, organicStyle, fieldScale, splatRadius, fieldGain, blurSmall, blurLarge,
-//                       glowIntensity, bandFreq, bandBase, threshold, nucleusThreshold, rimStrength,
+//                       glowIntensity, bandFreq, bandBase, threshold, nucleusThreshold, coreThreshold, rimStrength,
 //                       speciesTint, showParticles }
 //                                                             config.js の Organic 項目。スタイルごとの違い (使うパス・
 //                                                             スタイル固有の項目) は organicStyles.js の表
@@ -53,7 +53,7 @@ const MAX_BLUR_LEVEL = 6;            // 縮小の段数の上限 (1/64)
 // OrganicParams のフィールド位置 (organic.wgsl.js の ORGANIC_FIELDS の順)
 const OF = Object.fromEntries(ORGANIC_FIELDS.map((name, i) => [name, i]));
 // config.js の項目をそのままコピーするフィールド (同名)。残り (weightNorm, splatRadius, style, shape, dpr) は計算して入れる
-const COPIED_PARAMS = ['fieldGain', 'glowIntensity', 'bandFreq', 'threshold', 'nucleusThreshold', 'speciesTint', 'bandBase', 'rimStrength'];
+const COPIED_PARAMS = ['fieldGain', 'glowIntensity', 'bandFreq', 'threshold', 'nucleusThreshold', 'speciesTint', 'bandBase', 'rimStrength', 'coreThreshold'];
 
 const ALPHA_BLEND = {
     color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
@@ -629,7 +629,8 @@ export class GpuRenderer {
         // 密度 ρ (重み付き近傍数 Σ(1 - r/rMax)^2) の一様な場は、粒子数密度 n = 6ρ / (π rMax^2)。
         // カーネル (1 - d^2)^3 の面積は π s^2 / 4 (s = スプラット半径) なので、粒子 1 個の重み w で
         // field = w * n * π s^2 / 4 = 1.5 * w * ρ * (s / rMax)^2。ρ = 平均密度 = N π rMax^2 / (6 A) のとき field = 1。
-        // 構造の芯は平均の数倍〜10 倍になる (圧縮の制限が弱いとき)。
+        // 既定の設定での実測 (60,000 粒子、16:9): 粒子ごとの密度は二峰性で、ガス (小さな塊) は平均の ~0.4 倍、構造は 4〜11 倍。
+        // field (スプラット 0.5 rMax) ではガスの塊が ~0.5〜2、構造の芯が 5〜25 (docs/organic-rendering-spec.md の「実測した密度」)。
         // 平均密度の下限 0.5: 粒子がほとんど無いときに重みが発散しないように (通常の画面は ~10 以上なので影響しない)。
         const meanDensity = Math.max(sim.count / (world.width * world.height) * Math.PI * rMax * rMax / 6, 0.5);
         const splatRadius = org.splatRadius * style.fine.splat;

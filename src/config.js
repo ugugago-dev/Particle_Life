@@ -41,6 +41,8 @@ export const defaults = Object.freeze({
     // organic rendering (screen-space density field; see docs/organic-rendering-spec.md)
     // The splatted field is normalised so that the world's mean density reads 1.0 (robust to N, canvas size, rMax);
     // fieldGain scales it. Blur radii are Gaussian sigmas in x rMax.
+    // Thresholds are tuned to the measured density of the defaults above (60k particles, 16:9, 15 s of random rules):
+    // the gas between structures is made of small clumps reading ~0.5-2 at splatRadius 0.5, structure cores read 5-25.
     renderMode: 'organic',   // 'dots' | 'organic'
     organicStyle: 'glass',   // 'glass' | 'cell' | 'glow' | 'bands' | 'mono'
     fieldScale: 0.5,         // field texture resolution relative to the canvas
@@ -52,8 +54,9 @@ export const defaults = Object.freeze({
     glowIntensity: 1,        // glow: brightness of the outline
     bandFreq: 25,            // bands: sin(vec3(1,2,3) * bandFreq * r^3), r = bandBase + 0.8 * compressed density
     bandBase: 0.24,          // bands: r of empty space (st1's density_target); bandFreq * bandBase^3 ~ 0.35 = light blue
-    threshold: 0.6,          // density (x mean) below which cell/glow/mono see "empty" (the sparse gas between structures)
-    nucleusThreshold: 0.75,  // cell: how full the large-blur neighbourhood must be (0..1) for the nucleus to start; glass: compressed density (0..1) where the flat core starts
+    threshold: 1.5,          // density (x mean) below which cell/glow/mono see "empty": drops ~90% of the gas clumps, keeps thin membranes partly
+    nucleusThreshold: 0.7,   // cell: how full the large-blur neighbourhood must be (0..1) for the nucleus to start
+    coreThreshold: 0.8,      // glass: compressed density (0..1) where the flat core starts (0.8 ~ 4.6 x mean at the fine splat; drops most gas clumps)
     rimStrength: 1.3,        // glass: thickness/opacity of the white membrane line
     showParticles: false,    // overlay the dots (faint) on top of the organic look
 });

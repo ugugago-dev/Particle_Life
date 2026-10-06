@@ -63,6 +63,7 @@ export function createGUI(params, actions) {
         speciesTint: organic.add(params, 'speciesTint', 0, 1, 0.01),
         threshold: organic.add(params, 'threshold', 0.05, 4, 0.01),
         nucleusThreshold: organic.add(params, 'nucleusThreshold', 0.3, 0.99, 0.01),
+        coreThreshold: organic.add(params, 'coreThreshold', 0.3, 0.99, 0.01),
         rimStrength: organic.add(params, 'rimStrength', 0, 2, 0.05),
         glowIntensity: organic.add(params, 'glowIntensity', 0, 3, 0.01),
         bandFreq: organic.add(params, 'bandFreq', 1, 100, 0.5),
