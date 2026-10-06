@@ -1,5 +1,4 @@
-// CPU-side particle state (Structure-of-Arrays typed arrays), used only to *initialise* the
-// GPU buffers (the live state lives on the GPU: see gpu/simulation.js loadState). No DOM access.
+// CPU-side particle state, used only to initialise the GPU buffers (the live state lives on the GPU)
 
 /** @typedef {{width: number, height: number}} World */
 
@@ -13,12 +12,11 @@
  * @property {Uint32Array} type
  */
 
-/** World is `height = 1`; width follows the canvas aspect ratio. */
 export function createWorld(width = 1) {
     return { width: Math.fround(width), height: 1 };
 }
 
-/** @returns {ParticleState} zero-initialised state */
+/** @returns {ParticleState} */
 export function alloc(count) {
     return {
         count,
@@ -30,17 +28,13 @@ export function alloc(count) {
     };
 }
 
-/**
- * Wrap `v` into [0, size). The result is also guaranteed to be representable
- * as float32 and strictly below `size` (a float32 store can round up to `size`).
- */
+/** Wrap into [0, size), also after rounding to float32 (which can round up to `size`). */
 export function wrap(v, size) {
     if (v < 0 || v >= size) v -= size * Math.floor(v / size);
     const q = Math.fround(v);
     return q < size ? q : 0;
 }
 
-/** Uniform random positions, zero velocity, random types. */
 export function randomize(state, world, numTypes, rng = Math.random) {
     const { count, x, y, vx, vy } = state;
     for (let i = 0; i < count; i++) {
@@ -52,7 +46,6 @@ export function randomize(state, world, numTypes, rng = Math.random) {
     assignTypes(state, numTypes, rng);
 }
 
-/** Re-roll the type of every particle (positions are kept). */
 export function assignTypes(state, numTypes, rng = Math.random) {
     const { count, type } = state;
     for (let i = 0; i < count; i++) type[i] = Math.min(numTypes - 1, Math.floor(rng() * numTypes));

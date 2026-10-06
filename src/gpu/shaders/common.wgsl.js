@@ -1,12 +1,4 @@
-// 全シミュレーションパスで共有する WGSL (uniform 構造体とヘルパー)。
-//
-// Params は f32 / u32 のスカラーだけで構成する (vec を使わない) ので、
-// WGSL の uniform アライメント規則 (vec2=8, vec4=16 バイト境界) を気にしなくてよい。
-// 全体で 32 個 = 128 バイト (16 の倍数)。JS 側 (simulation.js の writeUniforms) と
-// フィールド順を必ず一致させること。
-//
-// 座標系: ワールドは [0, worldW) x [0, worldH) のトーラス (worldH = 1)。
-// セル番号は CPU 版 grid.js と同じ x-major:  cell = cx * ny + cy
+// シミュレーション共通の WGSL。Params はスカラーだけにしてアライメントを気にしなくてよくしてある (並びの一致は assertParamsLayout)
 
 export const PARAMS_STRUCT_FIELDS = [
     'dt', 'rMax2', 'invRMax', 'beta', 'invBeta', 'invOneMinusBeta', 'accelScale', 'friction',
@@ -14,7 +6,7 @@ export const PARAMS_STRUCT_FIELDS = [
     'numTypes', 'pointerActive', 'pointerX', 'pointerY', 'pointerR2', 'invPointerR', 'pointerStrength', 'rMax',
     'reach', 'maxSpeed', 'restDensity', 'pressureScale', 'viscosity', 'pad0', 'pad1', 'pad2',
 ];
-export const PARAMS_FLOATS = PARAMS_STRUCT_FIELDS.length; // 32
+export const PARAMS_FLOATS = PARAMS_STRUCT_FIELDS.length;
 
 export const COMMON_WGSL = /* wgsl */`
 struct Params {
@@ -40,45 +32,41 @@ struct Params {
   pointerY: f32,
   pointerR2: f32,
   invPointerR: f32,
-  pointerStrength: f32,   // mode * pointerStrength * forceFactor (0 when inactive)
+  pointerStrength: f32,   // mode * pointerStrength * forceFactor
   rMax: f32,
-  reach: u32,             // 近傍探索のセル数 K (セル幅 >= rMax / K、探索は ±K セル)
-  maxSpeed: f32,          // 速度の上限 (ワールド単位 / 秒)。0 = 無制限
-  restDensity: f32,       // これを超えた密度の分だけ圧力がかかる
-  pressureScale: f32,     // 0.5 * pressureStrength (0 = 圧力なし)
-  viscosity: f32,         // 圧縮中のペアの相対速度の減衰 (0 = なし。dt に対して発散しない上限に丸めてある)
-  pad0: f32,              // 16 バイト境界に合わせるだけ
+  reach: u32,             // 近傍探索の K (±K セル)
+  maxSpeed: f32,          // 0 = 無制限
+  restDensity: f32,
+  pressureScale: f32,     // 0.5 * pressureStrength
+  viscosity: f32,
+  pad0: f32,              // 16 バイト境界
   pad1: f32,
   pad2: f32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
 
-// 位置 -> セル番号 (CPU 版 grid.build と同じ式)。
-// min は float の丸めで x == worldW になったときの保険。
+// x-major (CPU 版 grid.build と同じ)。min は丸めで x == worldW になったときの保険
 fn cellIndex(x: f32, y: f32) -> u32 {
   let cx = min(P.nx - 1u, u32(x * P.invCellW));
   let cy = min(P.ny - 1u, u32(y * P.invCellH));
   return cx * P.ny + cy;
 }
 
-// v を [0, size) に巻き戻す (CPU 版 wrap と同じ。結果は必ず 0 <= q < size)。
+// [0, size) に巻き戻す (CPU 版 wrap と同じ)
 fn wrapPos(v: f32, size: f32) -> f32 {
   var q = v;
   if (q < 0.0 || q >= size) {
     q = q - size * floor(q / size);
   }
-  // 丸めで q == size や q < 0 (-1e-9 級) になる場合の保険
+  // 丸めの保険
   if (q >= size) { q = 0.0; }
   if (q < 0.0) { q = 0.0; }
   return q;
 }
 `;
 
-/**
- * WGSL の struct <structName> と JS 側のフィールド一覧 (uniform を書く順) が
- * 食い違っていないか、起動時に確認する (食い違うと値が黙ってずれるため)。
- */
+/** WGSL の struct と JS 側のフィールド順の食い違い (値が黙ってずれる) を起動時に検出する。 */
 export function assertStructLayout(source, structName, fields) {
     const body = new RegExp(`struct ${structName} \\{([^}]*)\\}`).exec(source)?.[1] ?? '';
     const names = [...body.matchAll(/^\s*(\w+)\s*:/gm)].map((m) => m[1]);

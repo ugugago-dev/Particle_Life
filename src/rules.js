@@ -1,5 +1,4 @@
-// Rule matrix: data[i * numTypes + j] in [-1, 1] is how strongly type i is
-// attracted (+) / repelled (-) by type j. Row = acting particle, column = target.
+// data[i * numTypes + j] in [-1, 1]: how strongly type i is attracted (+) / repelled (-) by type j
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -14,7 +13,6 @@ export class RuleMatrix {
         return this.data[i * this.numTypes + j];
     }
 
-    /** Stores the clamped value and returns it. */
     set(i, j, value) {
         const k = i * this.numTypes + j;
         this.data[k] = clamp(value, -1, 1);
@@ -30,7 +28,7 @@ export class RuleMatrix {
         this.data.fill(0);
     }
 
-    /** Keep the overlapping top-left block; new entries are random. */
+    /** Keeps the overlapping top-left block; new entries are random. */
     resize(numTypes, rng = Math.random) {
         const old = this.data;
         const oldN = this.numTypes;

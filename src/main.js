@@ -1,6 +1,4 @@
-// Wiring only: WebGPU init, simulation (compute), renderer, input and UI, then the rAF loop.
-// The simulation state lives entirely on the GPU; the frame loop never reads it back.
-// If WebGPU is unavailable a centered message is shown and nothing else runs (no CPU fallback).
+// Wiring only. The state lives on the GPU and is never read back; without WebGPU only a message is shown (no CPU fallback)
 
 import { createParams } from './config.js';
 import { RuleMatrix } from './rules.js';
@@ -16,7 +14,6 @@ import { GpuTimer } from './gpu/timer.js';
 async function main() {
     const canvas = document.querySelector('#canvas');
 
-    // ---- WebGPU init (failure -> message + stop)
     const gpu = await requestGPU();
     if (!gpu.ok) return showUnsupported(gpu.reason, 'unsupported');
     const { device } = gpu;
@@ -40,24 +37,22 @@ async function main() {
     }
     const timer = new GpuTimer(device);
 
-    // ---- state
     const params = createParams();
     const rules = new RuleMatrix(params.numTypes);
     const { pointer } = createInput(canvas);
     const stats = new StatsOverlay(timer.enabled);
     let palette = createPalette(params.numTypes);
-    let rulesDirty = true; // re-upload the rule matrix before the next frame
+    let rulesDirty = true;
 
-    // ---- layout: world width follows the canvas aspect ratio (height is always 1)
     function resize() {
         const cssW = canvas.clientWidth;
         const cssH = canvas.clientHeight;
         if (cssW === 0 || cssH === 0) return;
         renderer.resize(cssW, cssH, window.devicePixelRatio || 1);
-        sim.setWorld(cssW / cssH, 1); // wraps existing particles on the GPU; the grid follows on the next step
+        sim.setWorld(cssW / cssH, 1);
     }
     new ResizeObserver(resize).observe(canvas);
-    window.addEventListener('resize', resize); // also fires when browser zoom changes devicePixelRatio
+    window.addEventListener('resize', resize); // browser zoom changes devicePixelRatio without resizing the element
 
     sim.setRules(rules);
     rulesDirty = false;
@@ -67,7 +62,7 @@ async function main() {
     const matrix = new MatrixEditor(document.body, rules, palette, () => { rulesDirty = true; });
     matrix.setVisible(params.showMatrix);
 
-    // Reused every frame (no per-frame allocation); mutated from params / palette.
+    // reused every frame (no per-frame allocation)
     const view = {
         palette,
         particleRadius: params.particleRadius,
@@ -75,7 +70,7 @@ async function main() {
         pointer,
         pointerRadius: params.pointerRadius,
         rMax: params.rMax,
-        organic: params, // renderMode / organicStyle / fieldScale / splatRadius ... (config.js の Organic 項目)
+        organic: params,
     };
 
     const actions = {
@@ -108,7 +103,7 @@ async function main() {
         },
     };
 
-    // lil-gui comes from a CDN: load it last so a network problem cannot hide the WebGPU message.
+    // lil-gui comes from a CDN: load it last so a network problem cannot hide the WebGPU message
     try {
         const { createGUI } = await import('./ui/gui.js');
         createGUI(params, actions);
@@ -116,7 +111,6 @@ async function main() {
         console.error('lil-gui could not be loaded (offline?). Running without the control panel.', e);
     }
 
-    // ---- main loop
     function frame(now) {
         if (!alive) return;
         requestAnimationFrame(frame);

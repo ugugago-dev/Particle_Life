@@ -1,6 +1,4 @@
-// DOM overlay (bottom-left) to view and edit the rule matrix.
-// Row = acting particle type i, column = target type j: "row is attracted to column".
-//   click +0.1 | right click -0.1 | wheel +-0.05 | shift+click -> 0
+// Rule matrix overlay ("row is attracted to column"): click +0.1 | right click -0.1 | wheel +-0.05 | shift+click -> 0
 
 const CLICK_STEP = 0.1;
 const WHEEL_STEP = 0.05;
@@ -12,7 +10,7 @@ export class MatrixEditor {
      * @param {HTMLElement} parent
      * @param {import('../rules.js').RuleMatrix} rules edited in place
      * @param {{css: string[]}} palette
-     * @param {() => void} [onChange] called after the user edits a cell (e.g. to re-upload the rules to the GPU)
+     * @param {() => void} [onChange]
      */
     constructor(parent, rules, palette, onChange) {
         this.rules = rules;
@@ -37,7 +35,6 @@ export class MatrixEditor {
         this.panel.append(caption, this.grid, help);
         parent.append(this.panel);
 
-        // Event delegation: one listener per kind instead of one per cell.
         this.grid.addEventListener('click', (e) => this.onEdit(e, +CLICK_STEP));
         this.grid.addEventListener('contextmenu', (e) => {
             e.preventDefault();
@@ -56,7 +53,7 @@ export class MatrixEditor {
         this.panel.hidden = !visible;
     }
 
-    /** Rebuild the DOM, e.g. after numTypes changed. */
+    /** After numTypes changed. */
     rebuild(rules, palette) {
         this.rules = rules;
         const n = rules.numTypes;
@@ -82,7 +79,7 @@ export class MatrixEditor {
         this.refresh();
     }
 
-    /** Re-read every value from the rule matrix (after randomize / zero). */
+    /** After randomize / zero. */
     refresh() {
         const n = this.rules.numTypes;
         for (let i = 0; i < n; i++) {

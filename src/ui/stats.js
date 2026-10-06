@@ -1,13 +1,12 @@
-// Small DOM overlay (top-left): fps, GPU time (if timestamp-query is available), particle count.
-// DOM rather than canvas text, so it survives a renderer swap.
+// fps / GPU time / particle count overlay (DOM, so it survives a renderer swap)
 
-const SMOOTHING = 0.1;  // exponential moving average weight of the newest sample
-const REFRESH_MS = 250; // DOM text update interval
+const SMOOTHING = 0.1;  // EMA weight of the newest sample
+const REFRESH_MS = 250;
 
 const ema = (prev, value) => (prev === null ? value : prev + (value - prev) * SMOOTHING);
 
 export class StatsOverlay {
-    /** @param {boolean} gpuTimes true when timestamp-query is available (shows sim/draw GPU ms) */
+    /** @param {boolean} gpuTimes */
     constructor(gpuTimes = false, parent = document.body) {
         this.el = document.createElement('div');
         this.el.className = 'stats';
@@ -22,18 +21,17 @@ export class StatsOverlay {
         this.lastRefresh = 0;
     }
 
-    /** CPU time spent encoding + submitting one frame (not the GPU time). */
+    /** CPU time of encoding + submitting one frame. */
     recordCpu(ms) {
         this.cpuMs = ema(this.cpuMs, ms);
     }
 
-    /** GPU time of the simulation pass (all substeps) and of the draw passes, in ms. */
     recordGpu(simMs, drawMs) {
         if (simMs !== null && Number.isFinite(simMs)) this.simMs = ema(this.simMs, simMs);
         if (drawMs !== null && Number.isFinite(drawMs)) this.drawMs = ema(this.drawMs, drawMs);
     }
 
-    /** Call once per animation frame with the rAF timestamp. `info` is an optional extra line. */
+    /** Once per rAF; `info` is an optional extra line. */
     tick(now, particleCount, info = '') {
         if (this.lastTime) this.frameMs = ema(this.frameMs, now - this.lastTime);
         this.lastTime = now;
