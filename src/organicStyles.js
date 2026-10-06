@@ -7,6 +7,8 @@
 //   shape    : ぼかす前の場の整形 (shapeWGSL)。occupancy = しきい値を超えた分の占有度、compress = 密度の滑らかな圧縮、
 //              nucleus = 圧縮した密度が coreThreshold を超えた所 = 核の指標。
 //   granules : 顆粒テクスチャ (cell の小器官) を使う。使わないスタイルは顆粒の確保・書き込みを省く。
+//   paper    : 画面固定のノイズ (紙の目・縁の揺らぎ・核の揺らぎ) を使う。画面固定なので canvas のサイズ / dpr が変わったときだけ
+//              テクスチャに焼き、composite は 1 回の textureLoad で読む (毎フレーム画素ごとに value noise を計算しない)。
 //   params   : このスタイルが読む「スタイル固有」の config 項目。GUI はこれに含まれる項目だけ表示する。
 //              'blurLarge' を含まないスタイルは large ぼかし (と縮小の段) を作らない。
 
@@ -14,23 +16,23 @@ const FINE_NONE = { splat: 1, small: 1, large: 1 };
 
 export const ORGANIC_STYLES = {
     glass: {
-        index: 4, fine: { splat: 0.3, small: 0.3, large: 1 }, shape: 'nucleus', granules: false,
+        index: 4, fine: { splat: 0.3, small: 0.3, large: 1 }, shape: 'nucleus', granules: false, paper: false,
         params: ['coreThreshold', 'blurLarge', 'rimStrength'],
     },
     cell: {
-        index: 0, fine: FINE_NONE, shape: 'occupancy', granules: true,
+        index: 0, fine: FINE_NONE, shape: 'occupancy', granules: true, paper: true,
         params: ['threshold', 'nucleusThreshold', 'blurLarge', 'speciesTint'],
     },
     glow: {
-        index: 1, fine: FINE_NONE, shape: 'occupancy', granules: false,
+        index: 1, fine: FINE_NONE, shape: 'occupancy', granules: false, paper: false,
         params: ['threshold', 'glowIntensity', 'blurLarge', 'speciesTint'],
     },
     bands: {
-        index: 2, fine: { splat: 0.6, small: 0.5, large: 1 }, shape: 'compress', granules: false,
+        index: 2, fine: { splat: 0.6, small: 0.5, large: 1 }, shape: 'compress', granules: false, paper: false,
         params: ['bandFreq', 'bandBase', 'speciesTint'],
     },
     mono: {
-        index: 3, fine: FINE_NONE, shape: 'occupancy', granules: false,
+        index: 3, fine: FINE_NONE, shape: 'occupancy', granules: false, paper: false,
         params: ['threshold', 'blurLarge', 'speciesTint'],
     },
 };

@@ -14,8 +14,9 @@
 
 | # | パス | 入力 -> 出力 | 内容 |
 |---|---|---|---|
-| 1 | splat | 粒子 -> `field` (rgba16float) (+ cell だけ `granule` (r16float)) | 粒子ごとの四角形を加算。`field` = (色 x w, w)。カーネルは等方の `(1 - d^2)^3`。周期境界なので、端をまたぐ分を反対側にも描く (instance = 粒子 x 4。ずらした四角形が世界に掛からない粒子は、頂点シェーダで色やハッシュを読む前に縮退して捨てる)。cell は MRT のパイプライン (`fsGranule`)、ほかは field だけのパイプライン (`fs`) |
-| 2 | shape | `field` -> `shaped` (L0) | スタイルに合わせて場を整形 (後述)。出力は `(平均色 x c, c)` |
+| 0 | paper (cell だけ) | -> `paper` (rgba8unorm, canvas 解像度) | 画面固定のノイズ (紙の目・体の縁の揺らぎ・核の縁の揺らぎ) を焼く。canvas のサイズ / dpr が変わったとき (plan を作り直したとき) だけ |
+| 1 | splat | 粒子 -> `field` (rgba16float、周囲に余白) (+ cell だけ `granule` (r16float、余白付き)) | 粒子ごとの四角形 (4 頂点の triangle-strip、instance = 粒子) を加算。`field` = (色 x w, w)。カーネルは等方の `(1 - d^2)^3`。周期境界のコピーは描かず、端をまたぐ分は余白 (スプラット半径 + 1 px) に落とす。cell は MRT のパイプライン (`fsGranule`)、ほかは field だけのパイプライン (`fs`) |
+| 2 | shape | `field` -> `shaped` (L0) (+ cell だけ顆粒 -> 余白なしの `granule`) | 余白に落ちた端のはみ出しを反対側の端へ折り返して足し (周期境界)、スタイルに合わせて場を整形 (後述)。出力は `(平均色 x c, c)`。cell は顆粒も同じパスで折り返す (MRT、`fsGranule`) |
 | 3 | downsample | L(k-1) -> L(k) | 2x2 の箱平均で 1/2 ずつ縮小。ブラーの σ が大きいときだけ (下記) |
 | 4 | blur x 4 (bands は x 2) | L(ks) -> small、L(kl) -> large | 分離ガウス (水平 -> 垂直) を small (disk) と large (ring) の 2 本。サンプラは repeat (周期境界)。large を使わないスタイル (bands) は large のブラーと、その分の縮小段を作らない |
 | 5 | composite | small + large + granule -> canvas | スタイルの着色。不透明。そのあとに粒子の重ね描き (`showParticles`) とポインタ円 |
@@ -119,6 +120,8 @@ st3 の式そのまま: `glow = max((1-n)^2 - (1-m)^2, 0) * 4 * glowIntensity`�
 
 水彩の細胞イラスト。背景はオフホワイトの紙 (画面固定の value noise で目を付ける)。
 
+- 画面固定のノイズ (紙の目 = `0.6 vnoise(px 0.8) + 0.4 vnoise(px 2.3)`、縁の揺らぎ = `fbm(px 0.045)`、核の揺らぎ = `fbm(px 0.11)`、px = CSS px) は
+  paper パスで rgba8unorm のテクスチャに焼いておき、composite は 1 回の `textureLoad` で読む (毎フレーム画素ごとに最大 32 回のハッシュを計算しない。8 bit への量子化による差は画面で最大 1/255)。
 - 体: `mb = mix(m, n, 0.4) + 低周波ノイズ`、`body = smoothstep(0.3, 0.62, mb)` (縁 = 占有度 0.5 付近の等高線、ノイズでやや不規則)。外側に薄い青のにじみ。
 - 色: 深さ `depth = smoothstep(0.45, 0.98, mix(m, n, 0.6))` (縁 0 -> 内部 1) で 青 `(.36,.56,.86)` -> ミント `(.72,.91,.82)` -> 淡黄 `(.99,.96,.72)`。縁に少し濃い帯 (顔料だまり)、紙の目でムラ。
 - 核: `nuc = smoothstep(nucleusThreshold ± 0.03, n + 粗いノイズ)`。縁が濃く中心がやや明るい紫。大きなぼかしがほぼ満杯の所 = 大きな塊の中心だけに出る。
@@ -168,11 +171,16 @@ st3 の式そのまま: `glow = max((1-n)^2 - (1-m)^2, 0) * 4 * glowIntensity`�
 ## 実装メモ
 
 - `src/organicStyles.js`: スタイル表 (上記)。
-- `src/gpu/shaders/organic.wgsl.js`: `splatWGSL` / `shapeWGSL` / `downsampleWGSL` / `blurWGSL` / `compositeWGSL`。`OrganicParams` は 14 個の 4 バイト値 (56 バイト。style / shape だけ u32)。フィールド名は config.js の項目名と同じで、JS 側の `ORGANIC_FIELDS` と WGSL の struct の一致は起動時に `assertOrganicLayout` (common.wgsl.js の `assertStructLayout`) が確認する。`BlurParams` は 288 バイト。全画面三角形の頂点シェーダ `FULLSCREEN_VS` は render.wgsl.js のものを fade / blit / organic で共有する。
+- `src/gpu/shaders/organic.wgsl.js`: `splatWGSL` / `shapeWGSL` / `downsampleWGSL` / `blurWGSL` / `compositeWGSL`。`paperWGSL` (cell の画面固定ノイズ)。`OrganicParams` は 17 個の 4 バイト値 (68 バイト。style / shape だけ u32。fieldW / fieldH / margin は splat と shape の余白付き field の座標用)。フィールド名は config.js の項目名と同じで、JS 側の `ORGANIC_FIELDS` と WGSL の struct の一致は起動時に `assertOrganicLayout` (common.wgsl.js の `assertStructLayout`) が確認する。`BlurParams` は 288 バイト。全画面三角形の頂点シェーダ `FULLSCREEN_VS` は render.wgsl.js のものを fade / blit / organic で共有する。
 - `src/gpu/renderer.js`: `updateOrganicLayout` (field の解像度・σ・縮小段数)、`ensureOrganicPlan` / `buildOrganicPlan` (テクスチャ・パス・バインドグループ)、`drawOrganic`、`writeOrganicUniform` (変わったときだけアップロード)、`writeBlurUniforms`、`writeGaussianTaps`。
 - `trails` は organic では無視 (dots に戻したときは従来どおり)。`densityA` は読まない (simulation.js の `needDensity` も無くした。density パスは圧縮の制限が有効なときだけ走る)。
-- 性能の目安 (60,000 粒子、1920x1080、fieldScale 0.5、Intel UHD (内蔵 GPU)、描画 GPU 時間): glass ≈ 4.3 ms、bands ≈ 4.7 ms、cell ≈ 11 ms (ノイズが重い)、glow / mono ≈ 7.3 ms。dots は 0.5 ms。
-- 周期境界: splat の端のコピーとブラーの repeat サンプラで、画面の端でも輪郭が途切れない。縮小 (downsample) だけは端をクランプする (奇数サイズのときの最後の 1 テクセルだけ影響)。
+- 性能の目安 (60,000 粒子、1920x1080、fieldScale 0.5、Intel UHD (内蔵 GPU)、描画 GPU 時間。下記の最適化の前の値): glass ≈ 4.3 ms、bands ≈ 4.7 ms、cell ≈ 11 ms (ノイズが重い)、glow / mono ≈ 7.3 ms。dots は 0.5 ms。
+- 最適化 (同じ見た目のまま仕事を減らしたもの。swiftshader 上のタイムスタンプで計測、絶対値は実 GPU と違う):
+  - splat の周期境界を「粒子 x 4 instance」から「余白付き field + shape での折り返し」に: 頂点シェーダの実行が 1 粒子 24 回 -> 4 回 (strip 込み)。splat の時間 1/3。
+  - cell の画面固定ノイズを焼く: composite の画素ごとのハッシュ計算 (最大 32 回) が textureLoad 1 回に。
+  - 四角形 (dots / splat / ポインタ円) を triangle-list の 6 頂点から triangle-strip の 4 頂点に。
+- 周期境界: splat の余白の折り返しとブラーの repeat サンプラで、画面の端でも輪郭が途切れない。縮小 (downsample) だけは端をクランプする (奇数サイズのときの最後の 1 テクセルだけ影響)。
+  余白は field の大きさで頭打ち (スプラット半径が field より大きい極端な設定では 1 回分しか折り返さない。以前の 4 コピー方式と同じ)。
 
 ## 受け入れ基準
 

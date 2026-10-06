@@ -1,10 +1,13 @@
 // 有機的な描画 (スクリーン空間のフィールド) 用 WGSL。パス構成 (docs/organic-rendering-spec.md):
 //   splat      : 粒子ごとの四角形を field テクスチャへ加算 (rgb = 色 x w, a = w)。
-//                cell だけは同じパスで「顆粒」テクスチャ (細胞内小器官) にも書く (MRT)
-//   shape      : field をスタイルの shape (src/organicStyles.js) に合わせて 0..1 の指標に整形する
+//                cell だけは同じパスで「顆粒」テクスチャ (細胞内小器官) にも書く (MRT)。
+//                field は周囲に margin px の余白を持つ (端をまたぐスプラットのはみ出し分を受ける)
+//   shape      : field の余白を反対側の端へ折り返して足し (周期境界)、スタイルの shape (src/organicStyles.js) に合わせて
+//                0..1 の指標に整形する。cell は顆粒も同じパスで折り返す (MRT)
 //   downsample : 1/2 ずつ縮小。ブラーの σ が大きいとき、低解像度でぼかして安くする
 //   blur       : 分離ガウスぼかし (水平 / 垂直)。バイリニアで 2 テクセルを 1 フェッチにまとめたタップ表を使う
 //   composite  : small (= disk) と large (= ring) のぼかしからスタイルごとに着色して canvas へ (不透明)
+//   paper      : cell の画面固定のノイズを canvas 解像度のテクスチャに焼く (canvas のサイズ / dpr が変わったときだけ)
 // 共通の RenderParams (binding 0) は render.wgsl.js のものをそのまま使う (splat / composite)。
 
 import { MAX_PALETTE, RENDER_COMMON, FULLSCREEN_VS } from './render.wgsl.js';
@@ -16,6 +19,7 @@ import { ORGANIC_STYLES, SHAPE_INDEX } from '../../organicStyles.js';
 export const ORGANIC_FIELDS = [
     'weightNorm', 'splatRadius', 'fieldGain', 'style', 'shape', 'glowIntensity', 'bandFreq', 'threshold',
     'nucleusThreshold', 'speciesTint', 'dpr', 'bandBase', 'rimStrength', 'coreThreshold',
+    'fieldW', 'fieldH', 'margin',
 ];
 export const ORGANIC_UNIFORM_FLOATS = ORGANIC_FIELDS.length;
 
@@ -46,6 +50,9 @@ struct OrganicParams {
   bandBase: f32,          // bands: 密度 0 (空き) の r。freq * base^3 が空きの位相
   rimStrength: f32,       // glass: 膜の線の太さ・濃さ
   coreThreshold: f32,     // glass: 核の指標のしきい値 (圧縮した密度、0..1)
+  fieldW: f32,            // field の大きさ (px、余白を除く)
+  fieldH: f32,
+  margin: f32,            // field の余白 (px、整数)。スプラット半径 + 1 以上
 };
 
 ${STYLE_CONSTS}
@@ -100,34 +107,20 @@ fn hashF(x: u32) -> f32 {
   return f32(hashU(x)) / 4294967295.0;
 }
 
-// instance = 粒子 x 4。周期境界なので、端をまたぐ分は反対側にもう 1 つ描く
-// (コピー 0 = 本体、1 = x ずらし、2 = y ずらし、3 = 両方)。ずらした四角形が世界に掛からない粒子 (端から
-// splatRadius 以内でない) は、色やハッシュを読む前に縮退した位置を返して捨てる
+// instance = 粒子 (4 頂点の strip)。周期境界は描画側でコピーを作らず、余白付きの field に描いて shape パスで折り返す
+// (端をまたぐ分は余白に落ちる。余白 margin >= スプラット半径 + 1 px なので切れない)
 @vertex
-fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
-  let pi = ii >> 2u;
-  let copy = ii & 3u;
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) pi: u32) -> VSOut {
   let p = posVel[pi];
-  let world = R.worldSize;
-  let s = O.splatRadius;
-
-  var out: VSOut;
-  let nearX = p.x < s || p.x > world.x - s;
-  let nearY = p.y < s || p.y > world.y - s;
-  if (((copy & 1u) != 0u && !nearX) || ((copy & 2u) != 0u && !nearY)) {
-    out.pos = vec4f(2.0, 2.0, 2.0, 1.0);
-    return out;
-  }
-
-  var shift = vec2f(0.0);
-  if ((copy & 1u) != 0u) { shift.x = select(world.x, -world.x, p.x > 0.5 * world.x); }
-  if ((copy & 2u) != 0u) { shift.y = select(world.y, -world.y, p.y > 0.5 * world.y); }
   let pm = particleMeta[pi];
   let t = min(pm.x, ${MAX_PALETTE - 1}u);
   let c = quadCorner(vi);
-  let posPx = (p.xy + shift + c * s) / world * R.canvasSize;
+  let fieldPx = vec2f(O.fieldW, O.fieldH);
+  let padded = fieldPx + 2.0 * O.margin;
+  let posPx = (p.xy + c * O.splatRadius) / R.worldSize * fieldPx + O.margin;   // 余白付き field の px (y 下向き)
 
-  out.pos = vec4f(pxToNdc(posPx), 0.0, 1.0);
+  var out: VSOut;
+  out.pos = vec4f(posPx.x / padded.x * 2.0 - 1.0, 1.0 - posPx.y / padded.y * 2.0, 0.0, 1.0);
   out.d = c;
   out.color = palette[t].rgb;
   if (O.style == STYLE_CELL && hashF(pm.y * 2u) < GRANULE_FRACTION) {
@@ -176,7 +169,27 @@ fn fsGranule(in: VSOut) -> GranuleOut {
 //   SHAPE_NUCLEUS (glass)  : c = 圧縮した密度が coreThreshold を超えた所 = 核の指標 (0 か 1 に近い)。体・核・膜はすべてこのぼかしから作る
 export const shapeWGSL = ORGANIC_SHARED + FULLSCREEN_VS + /* wgsl */`
 @group(0) @binding(0) var<uniform> O: OrganicParams;
-@group(0) @binding(1) var src: texture_2d<f32>;
+@group(0) @binding(1) var src: texture_2d<f32>;          // 余白付きの field
+@group(0) @binding(2) var granuleSrc: texture_2d<f32>;   // 余白付きの顆粒 (cell の fsGranule だけ)
+
+// 余白付きテクスチャの (x, y) (余白を除いた座標) の値 = 本体 + 余白に落ちた反対側の端のはみ出し分。
+// 余白 m <= field の大きさなので、各軸で見る所は「そのまま / +fw / -fw」の 3 通りまで (たいていは 1 か所)
+fn folded(t: texture_2d<f32>, x: vec2i) -> vec4f {
+  let m = i32(O.margin);
+  let size = vec2i(i32(O.fieldW), i32(O.fieldH));
+  let limit = size + 2 * m;
+  var sum = vec4f(0.0);
+  for (var i = -1; i <= 1; i++) {
+    let px = x.x + m + i * size.x;
+    if (px < 0 || px >= limit.x) { continue; }
+    for (var j = -1; j <= 1; j++) {
+      let py = x.y + m + j * size.y;
+      if (py < 0 || py >= limit.y) { continue; }
+      sum += textureLoad(t, vec2i(px, py), 0);
+    }
+  }
+  return sum;
+}
 
 const OCC_SHARP = 2.0;
 // 圧縮: 密度 v (平均 = 1) を 0..1 に: 1 - exp(-(v / s)^p)。ぼかす前に飽和させるので、芯の粒子ノイズが縞に乗らない。
@@ -192,9 +205,7 @@ fn compress(v: f32, s: f32, p: f32) -> f32 {
   return 1.0 - exp(-pow(v / s, p));
 }
 
-@fragment
-fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
-  let f = textureLoad(src, vec2i(frag.xy), 0);
+fn shapeField(f: vec4f) -> vec4f {
   let v = f.a * O.fieldGain;
   var c: f32;
   switch (O.shape) {
@@ -203,6 +214,26 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     case SHAPE_OCCUPANCY, default: { c = 1.0 - exp(-OCC_SHARP * max(v - O.threshold, 0.0)); }
   }
   return vec4f(meanColor(f) * c, c);
+}
+
+@fragment
+fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
+  return shapeField(folded(src, vec2i(frag.xy)));
+}
+
+struct ShapeGranuleOut {
+  @location(0) shaped: vec4f,
+  @location(1) granule: f32,
+};
+
+// cell: 顆粒も同じパスで折り返して、余白なしの顆粒テクスチャへ (composite がバイリニアで読む)
+@fragment
+fn fsGranule(@builtin(position) frag: vec4f) -> ShapeGranuleOut {
+  let x = vec2i(frag.xy);
+  var out: ShapeGranuleOut;
+  out.shaped = shapeField(folded(src, x));
+  out.granule = folded(granuleSrc, x).r;
+  return out;
 }
 `;
 
@@ -246,27 +277,10 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
 }
 `;
 
-export const compositeWGSL = ORGANIC_COMMON + FULLSCREEN_VS + /* wgsl */`
-@group(0) @binding(1) var<uniform> O: OrganicParams;
-@group(0) @binding(2) var samp: sampler;
-@group(0) @binding(3) var smallBlur: texture_2d<f32>;     // disk: 小さなぼかし (rgb = 色 x c, a = c)
-@group(0) @binding(4) var largeBlur: texture_2d<f32>;     // ring: 大きなぼかし (large を使わないスタイルでは small が入っていて読まない)
-@group(0) @binding(5) var granuleTex: texture_2d<f32>;    // 顆粒 (r。cell 以外では small が入っていて読まない)
-
-fn luma(c: vec3f) -> f32 {
-  return dot(c, vec3f(0.299, 0.587, 0.114));
-}
-
-// 種類の色を明るさを保って混ぜる (色相だけ寄せる)
-fn tinted(base: vec3f, c: vec3f, amount: f32) -> vec3f {
-  let k = luma(base) / max(luma(c), 0.05);
-  return mix(base, clamp(c * k, vec3f(0.0), vec3f(1.0)), amount);
-}
-
-// 半分の強さの混ぜ (bands / mono)
-fn tintedHalf(base: vec3f, c: vec3f) -> vec3f {
-  return tinted(base, c, O.speciesTint * 0.5);
-}
+// cell の画面固定のノイズ (px = CSS px)。r = 紙の目、g = 縁の揺らぎ (低周波)、b = 核の縁の揺らぎ。
+// 値は 0..1 なので rgba8unorm に焼く (量子化 1/255 は使う側の振幅 0.07〜0.3 に対して見えない)
+export const paperWGSL = ORGANIC_SHARED + FULLSCREEN_VS + /* wgsl */`
+@group(0) @binding(0) var<uniform> O: OrganicParams;
 
 fn hash21(p: vec2f) -> f32 {
   var p3 = fract(vec3f(p.x, p.y, p.x) * 0.1031);
@@ -286,23 +300,55 @@ fn fbm(p: vec2f) -> f32 {
   return 0.5 * vnoise(p) + 0.3 * vnoise(p * 2.03 + 17.1) + 0.2 * vnoise(p * 4.1 + 41.7);
 }
 
+@fragment
+fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
+  let px = frag.xy / O.dpr;
+  let grain = 0.6 * vnoise(px * 0.8) + 0.4 * vnoise(px * 2.3 + 9.1);
+  return vec4f(grain, fbm(px * 0.045), fbm(px * 0.11 + 5.3), 1.0);
+}
+`;
+
+export const compositeWGSL = ORGANIC_COMMON + FULLSCREEN_VS + /* wgsl */`
+@group(0) @binding(1) var<uniform> O: OrganicParams;
+@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var smallBlur: texture_2d<f32>;     // disk: 小さなぼかし (rgb = 色 x c, a = c)
+@group(0) @binding(4) var largeBlur: texture_2d<f32>;     // ring: 大きなぼかし (large を使わないスタイルでは small が入っていて読まない)
+@group(0) @binding(5) var granuleTex: texture_2d<f32>;    // 顆粒 (r。cell 以外では small が入っていて読まない)
+@group(0) @binding(6) var paperTex: texture_2d<f32>;      // cell の画面固定のノイズ (paperWGSL。cell 以外では small が入っていて読まない)
+
+fn luma(c: vec3f) -> f32 {
+  return dot(c, vec3f(0.299, 0.587, 0.114));
+}
+
+// 種類の色を明るさを保って混ぜる (色相だけ寄せる)
+fn tinted(base: vec3f, c: vec3f, amount: f32) -> vec3f {
+  let k = luma(base) / max(luma(c), 0.05);
+  return mix(base, clamp(c * k, vec3f(0.0), vec3f(1.0)), amount);
+}
+
+// 半分の強さの混ぜ (bands / mono)
+fn tintedHalf(base: vec3f, c: vec3f) -> vec3f {
+  return tinted(base, c, O.speciesTint * 0.5);
+}
+
 // 以下 s = 小さなぼかし (disk)、l = 大きなぼかし (ring)。どちらも整形済みの場 (shape) のぼかしで、
 // a = shape の指標 (occupancy: 占有度 / compress: 圧縮した密度 / nucleus: 核の指標)、rgb / a = 平均色。
 
 // ---- cell: 水彩の細胞イラスト (青 -> ミント -> 淡黄の体、紫の核、薄い顆粒、紙の目)
 //      体の縁 = 占有度 0.5 の等高線、深さ = 大きなぼかしの占有度 (縁 0.5 -> 内部 1)、核 = 大きなぼかしがほぼ満杯の所
-fn cellStyle(s: vec4f, l: vec4f, g: f32, px: vec2f) -> vec3f {
+//      noise = paperTex (r = 紙の目、g = 縁の揺らぎ、b = 核の縁の揺らぎ)
+fn cellStyle(s: vec4f, l: vec4f, g: f32, noise: vec3f) -> vec3f {
   let C = meanColor(s);                                 // 種類の平均色
   let m = s.a;
   let n = l.a;
 
   // 紙: オフホワイト + 目 (紙は動かないので画面固定のノイズ)。目の濃淡 gk は顔料のムラにも使う
-  let grain = 0.6 * vnoise(px * 0.8) + 0.4 * vnoise(px * 2.3 + 9.1);
+  let grain = noise.r;
   let gk = 0.2 * (grain - 0.5);
   let paper = vec3f(0.96, 0.945, 0.90) * (0.95 + 0.07 * grain);
 
   // 体: 縁を低周波ノイズで少し揺らす (やや不規則な縁)
-  let wob = (fbm(px * 0.045) - 0.5) * 0.3;
+  let wob = (noise.g - 0.5) * 0.3;
   let mb = mix(m, n, 0.4) + wob;
   let body = smoothstep(0.3, 0.62, mb);
   let bleed = smoothstep(0.05, 0.3, mb) * (1.0 - body);    // 縁の外側ににじむ薄い青
@@ -327,11 +373,11 @@ fn cellStyle(s: vec4f, l: vec4f, g: f32, px: vec2f) -> vec3f {
   col = mix(col, col * vec3f(0.66, 0.66, 0.76), gr * 0.55);
 
   // 核: 少し粗い (ノイズで揺らした) くっきりした縁、縁が濃く中心がやや明るい紫。
-  // ノイズの揺らぎは ±0.06、smoothstep の幅は 0.03: n がしきい値より 0.09 以上低い所は核が 0 なので fbm を省く
+  // ノイズの揺らぎは ±0.06、smoothstep の幅は 0.03: n がしきい値より 0.09 以上低い所は核が 0
   var nuc = 0.0;
   var nCol = vec3f(0.0);
   if (n > O.nucleusThreshold - 0.09) {
-    let vn = n + (fbm(px * 0.11 + 5.3) - 0.5) * 0.12;
+    let vn = n + (noise.b - 0.5) * 0.12;
     nuc = smoothstep(O.nucleusThreshold - 0.03, O.nucleusThreshold + 0.03, vn) * body;
     let nd = saturate((vn - O.nucleusThreshold) / max(1.0 - O.nucleusThreshold, 0.05));
     nCol = mix(vec3f(0.38, 0.19, 0.50), vec3f(0.54, 0.34, 0.65), smoothstep(0.0, 1.0, nd));
@@ -436,7 +482,7 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
   switch (O.style) {
     case STYLE_CELL: {
       let g = textureSampleLevel(granuleTex, samp, uv, 0.0).r;
-      col = cellStyle(s, sampleLarge(uv), g, frag.xy / O.dpr);    // px = CSS px
+      col = cellStyle(s, sampleLarge(uv), g, textureLoad(paperTex, vec2i(frag.xy), 0).rgb);
     }
     case STYLE_GLOW: { col = glowStyle(s, sampleLarge(uv)); }
     case STYLE_BANDS: { col = bandsStyle(s, uv); }

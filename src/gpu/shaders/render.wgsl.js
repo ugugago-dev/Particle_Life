@@ -1,4 +1,4 @@
-// 描画用 WGSL。頂点バッファなし: instance = 1 パーティクル、6 頂点 (2 三角形) の四角形を
+// 描画用 WGSL。頂点バッファなし: instance = 1 パーティクル、4 頂点 (triangle-strip の 2 三角形) の四角形を
 // vertex_index から作り、フラグメントで円 (滑らかなアルファ) にする。
 // 位置・種類はシミュレーションのストレージバッファを直接読む。
 //
@@ -27,11 +27,10 @@ struct RenderParams {
 
 const BG = vec3f(1.0 / 255.0, 14.0 / 255.0, 29.0 / 255.0);   // style.css の --bg と同じ
 
-// 6 頂点 (2 三角形) の四角形: vertex_index -> [-1, 1]^2 の角
+// 4 頂点 (triangle-strip、instance ごとに別のストリップ) の四角形: vertex_index -> [-1, 1]^2 の角
+// (-1,-1) (1,-1) (-1,1) (1,1)。triangle-list の 6 頂点より頂点シェーダの実行が 1/3 少ない
 fn quadCorner(vi: u32) -> vec2f {
-  var idx = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
-  let k = idx[vi];
-  return vec2f(f32(k & 1u), f32(k >> 1u)) * 2.0 - 1.0;
+  return vec2f(f32(vi & 1u), f32(vi >> 1u)) * 2.0 - 1.0;
 }
 
 // デバイス px (左上原点) -> NDC

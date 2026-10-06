@@ -5,8 +5,9 @@
 //
 //   バッファ A : 「現在の状態」 (x, y, vx, vy, type, id, density)。ステップの入力かつ出力。描画も A を読む。
 //   バッファ B : scatter でセル順に並べ替えた作業コピー。force が読む (近傍が連続メモリになる)。
-//                近傍ループが 1 回の 16 バイト読み込みで済むよう (x, y, type, pressure) と
-//                (vx, vy, id) に詰め替えてある。pressure は density パスが書く (圧縮の制限が有効なときだけ走る)。
+//                近傍ループが 1 回の 16 バイト読み込みで済むよう (x, y, type, -) と (vx, vy, id) に詰め替えてある。
+//                圧縮の制限が有効なときは density パスが (x, y, type, pressure) を posTypeP に書き、force はそちらを読む
+//                (近傍ループが読むバッファをすべて read のバインディングにするため。in-place で .w に書くと read_write になる)。
 //                速度は viscosity > 0 のときだけ読む。
 //   force は B を読んで A に書く (近傍の位置を読み続けるので in-place は不可)。
 //   A も B も同じ「セル順」の並びになる。id (= meta.y) で元の index を追える。
@@ -115,6 +116,7 @@ export class GpuSimulation {
             densityA: mk('density A', m * 4),  // f32 (重み付き近傍数。density パスが書く。デバッグの読み戻し用)
             posTypeB: mk('posType B (cell-sorted)', m * 16),  // vec4f (x, y, type, pressure)
             velIdB: mk('velId B (cell-sorted)', m * 16),      // vec4f (vx, vy, id, 0)
+            posTypeP: mk('posType + pressure (cell-sorted)', m * 16),  // vec4f (x, y, type, pressure)。density パスが書く
             slot: mk('particleSlot', m * 8),   // vec2<u32> (cell, セル内通し番号)
         };
         this.rebuildBindGroups();
@@ -158,19 +160,19 @@ export class GpuSimulation {
             layout: pipelines[name].getBindGroupLayout(0),
             entries: [U, ...entries.map((buffer, i) => ({ binding: i + 1, resource: { buffer } }))],
         });
-        const { posVelA, metaA, densityA, posTypeB, velIdB, slot } = buffers;
+        const { posVelA, metaA, densityA, posTypeB, velIdB, posTypeP, slot } = buffers;
         this.bindGroups.wrap = bg('wrap', [posVelA]);
         if (!cellBuffers) return;
         const { numCellParticles, firstCellParticle } = cellBuffers;
         this.bindGroups.count = bg('count', [posVelA, numCellParticles, slot]);
         this.bindGroups.scan = bg('scan', [numCellParticles, firstCellParticle]);
         this.bindGroups.scatter = bg('scatter', [posVelA, metaA, slot, firstCellParticle, posTypeB, velIdB]);
-        this.bindGroups.density = bg('density', [posTypeB, firstCellParticle, densityA]);
+        this.bindGroups.density = bg('density', [posTypeB, firstCellParticle, densityA, posTypeP]);
         if (rulesBuffer) {
-            const forceBuffers = [posTypeB, velIdB, firstCellParticle, rulesBuffer, posVelA, metaA];
-            this.bindGroups.force = bg('force', forceBuffers);
-            this.bindGroups.forceP = bg('forceP', forceBuffers);
-            this.bindGroups.forcePV = bg('forcePV', forceBuffers);
+            this.bindGroups.force = bg('force', [posTypeB, velIdB, firstCellParticle, rulesBuffer, posVelA, metaA]);
+            const pressureBuffers = [posTypeP, velIdB, firstCellParticle, rulesBuffer, posVelA, metaA];
+            this.bindGroups.forceP = bg('forceP', pressureBuffers);
+            this.bindGroups.forcePV = bg('forcePV', pressureBuffers);
         }
     }
 
