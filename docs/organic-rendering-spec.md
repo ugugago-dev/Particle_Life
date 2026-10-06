@@ -1,105 +1,160 @@
-# 有機的な描画 仕様書 (未実装・後回し)
+# 有機的な描画 仕様書
 
-粒子を「点の集まり」ではなく「細胞・組織・粘菌のような生き物」に見せるための描画仕様。
-シミュレーション側は変更しない (描画は既存バッファの読み取りのみ)。
+粒子を「点の集まり」ではなく「細胞・SmoothLife の構造」のように見せる描画 (`renderMode: 'organic'`)。
+シミュレーション側は変更しない (描画は位置・種類の読み取りだけ)。`renderMode: 'dots'` は従来どおりの点描画で、変更なし。
 
-## 前提: 使えるデータ (すべて GPU 上、CPU 読み戻しなし)
+参考にしたもの (すべて `docs/` 内):
 
-| バッファ | 内容 | 用途 |
-|---|---|---|
-| `posVelA` vec4f | (x, y, vx, vy) | 位置、速度 (伸び・向き・脈動) |
-| `metaA` vec2u | (type, id) | 色 (組織の種類)、id ごとの乱数位相 |
-| `densityA` f32 | 重み付き近傍数 Σ(1 - r/rMax)² (前ステップ) | 構造の「中身の詰まり具合」。核・膜の判定 |
+- `st1.txt` (Shadertoy, 流体 + スライム) の Image パス (非ヘイトマップ側): `sin(vec3(1,2,3) * freq * r^3)`
+- `st2.txt` (SmoothLife) の Image パス: 場そのもののグレースケール
+- `st3.txt` (SmoothLife L) の Image パス: disk 平均 m と ring 平均 n による輪郭発光
+- 水彩の生物細胞イラスト (青 -> ミント -> 淡黄の体、紫の核、顆粒)
 
-`densityA` は圧縮制限 (`limitPressure`) のために追加されたもので、描画側でもそのまま使える。
-目安: 孤立粒子 ≈ 0、背景 ≈ 5〜10、構造の内部 ≈ 15〜35 (restDensity = 20 のとき)。
+## パイプライン (organic のとき、トレイルは無視して不透明な全画面を描く)
 
-## 目標とする見た目
+| # | パス | 入力 -> 出力 | 内容 |
+|---|---|---|---|
+| 1 | splat | 粒子 -> `field` (rgba16float) (+ cell だけ `granule` (r16float)) | 粒子ごとの四角形を加算。`field` = (色 x w, w)。カーネルは等方の `(1 - d^2)^3`。周期境界なので、端をまたぐ分を反対側にも描く (instance = 粒子 x 4。ずらした四角形が世界に掛からない粒子は、頂点シェーダで色やハッシュを読む前に縮退して捨てる)。cell は MRT のパイプライン (`fsGranule`)、ほかは field だけのパイプライン (`fs`) |
+| 2 | shape | `field` -> `shaped` (L0) | スタイルに合わせて場を整形 (後述)。出力は `(平均色 x c, c)` |
+| 3 | downsample | L(k-1) -> L(k) | 2x2 の箱平均で 1/2 ずつ縮小。ブラーの σ が大きいときだけ (下記) |
+| 4 | blur x 4 (bands は x 2) | L(ks) -> small、L(kl) -> large | 分離ガウス (水平 -> 垂直) を small (disk) と large (ring) の 2 本。サンプラは repeat (周期境界)。large を使わないスタイル (bands) は large のブラーと、その分の縮小段を作らない |
+| 5 | composite | small + large + granule -> canvas | スタイルの着色。不透明。そのあとに粒子の重ね描き (`showParticles`) とポインタ円 |
 
-1. **膜 (メタボール)**: 近くの粒子同士が溶け合い、輪郭が滑らかな 1 つの塊になる。
-2. **内部の濃淡**: 密度の高い部分 (構造の芯) は濃く・暗く「核」っぽく、縁は半透明で明るい「膜」。
-3. **リムライト**: 塊の縁に細い明るい線 (細胞膜)。
-4. **種類ごとの色の混ざり**: 異なる type の境界は色が滑らかに混ざる (組織の境界)。
-5. **わずかな動き**: 速度方向に少し伸びる、id ごとの位相でゆっくり脈打つ。
-6. 背景は暗いまま (既存の BG `#010e1d`)。
+解像度:
 
-## 方式: 2 パス スクリーン空間メタボール
+- `field` / `shaped` / `granule` は canvas x `fieldScale` (既定 0.5)。リサイズ・DPR 変更・スタイル変更 (large / 顆粒を使うかが変わるとき) は、field サイズと縮小段数・使うものの数値を毎フレーム前回の計画と比べて、変わったときだけテクスチャ・バインドグループを作り直す。顆粒テクスチャは cell だけ確保する。
+- ブラーは 1 方向の σ を 5 テクセル以下に収める: σ (field の px) が大きいときは `ceil(log2(σ / 5))` 段だけ 1/2 に縮小した解像度で行う (最大 1/64)。small と large は別々に段数を決める。
+- タップは「2 テクセルを 1 フェッチにまとめたバイリニア」の表 (CPU で計算して uniform に入れる。σ が変わったパスだけ書き直す)。半径 3σ (σ ≦ 5 テクセルなら 15 テクセル) で 1 方向 17 フェッチ、上限は 33 フェッチ。
+- composite は small をバイリニアで canvas 解像度に引き伸ばしてサンプルし、large / granule は使うスタイルの分岐の中でだけサンプルする (使わないスタイルでは small が束縛されているだけ)。
 
-### パス 1: スプラット (フィールド蓄積)
+## 正規化 (粒子数・画面サイズ・rMax に依存しない)
 
-- 出力: `field` テクスチャ (`rgba16float`, 解像度 = キャンバスの 1/2、GUI で 1/1〜1/4)。
-- 各粒子をインスタンス描画 (既存の particle パイプラインと同じ 6 頂点の四角形)。
-  - 半径 `splatRadius` (ワールド単位、既定 = rMax × 0.6)。
-  - 速度方向に `1 + stretch × |v| / maxSpeed` 倍伸ばした楕円にする (既定 stretch = 0.5)。
-- フラグメント: カーネル `w = (1 - d²)³` (d は楕円内の正規化距離、d ≥ 1 で discard)。
-- 加算ブレンド (`one`, `one`) で書く値:
-  - `rgb = palette[type] × w`
-  - `a = w`
-- 密度で重みを調整: `w *= mix(1.0, coreBoost, smoothstep(restDensity × 0.5, restDensity × 1.5, density))`
-  (詰まった部分ほどフィールドが濃くなる)。
+`field` は **画面全体の平均密度のとき 1**。粒子 1 個の重みは `w = 1 / (1.5 * ρ_mean * splatRadius^2)`。
 
-### パス 2: 合成 (フルスクリーン三角形 → canvas)
+- 密度 ρ = 重み付き近傍数 `Σ(1 - r/rMax)^2` の一様な場の粒子数密度は `n = 6ρ / (π rMax^2)`、カーネルの面積は `π s^2 / 4` (`s = splatRadius * rMax`)。よって `field = w * n * π s^2 / 4 = 1.5 * w * ρ * splatRadius^2`。
+- 平均密度 `ρ_mean = N π rMax^2 / (6 A)` (A = 世界の面積 = アスペクト比 x 1)。
+- 圧縮の制限が弱いと構造の芯は平均の数倍〜10 倍 (実測 3〜12 倍) になる。なので `restDensity` は基準にしない。芯の高さは `fieldGain` と shape の飽和曲線で受ける。
+- ブラー半径・スプラット半径は `rMax` の倍率 (ワールド単位) で持ち、field の px へは `fh / world.height` で換算するので、画面サイズ・DPR に依存しない。
 
-`field` をバイリニアでサンプルし、`F = field.a`、`C = field.rgb / max(F, ε)` (加重平均色)。
+## スタイル表 (`src/organicStyles.js`)
 
-- **塗り**: `fill = smoothstep(threshold - edge, threshold + edge, F)` (既定 threshold = 0.5, edge = 0.08)。
-- **核**: `core = smoothstep(threshold × 2, threshold × 4, F)` → 色を `C × (1 - 0.5 × core)` で暗く、彩度を少し上げる。
-- **法線とリム**: `∇F` を中心差分で求め、`n = normalize(vec3(-∇F × normalScale, 1))`。
-  - リム: `rim = (1 - fill) × smoothstep(threshold × 0.6, threshold, F)` を明るい色 (`C` を白寄せ) で加算。
-  - 簡易ライティング: 固定の光源方向 `L` で `diffuse = 0.6 + 0.4 × dot(n, L)`。
-- **内部のテクスチャ (任意)**: 粒子の位置にもとづく細かいノイズは使わず、`F` の等高線を薄く描いて
-  「細胞質の模様」にする: `0.05 × sin(F × 20)`。
-- 最終色 = `mix(BG, C × diffuse, fill × opacity) + rim × rimColor`。
+スタイルごとの違いは 1 つの表 `ORGANIC_STYLES` にまとめてあり、レンダラ・WGSL・GUI はここから導く。
 
-### 粒子そのもの (任意で重ねる)
+| 項目 | 意味 |
+|---|---|
+| `index` | WGSL の `STYLE_<NAME>` (表から生成した定数。composite の `switch` の case) |
+| `fine` | スプラット半径 / small ぼかし / large ぼかしの倍率 (bands: 0.6 / 0.5、glass: 0.3 / 0.3 / 1、ほかは 1) |
+| `shape` | shape パスの種類 (`occupancy` / `compress` / `nucleus`)。WGSL の `SHAPE_<NAME>` |
+| `granules` | 顆粒テクスチャを使う (cell だけ) |
+| `params` | そのスタイルが読むスタイル固有の config 項目。GUI はこれに含まれる項目だけ表示する。`blurLarge` を含まないスタイルは large ぼかしを作らない |
 
-- `showParticles` が true のとき、既存の点描画を `alpha = 0.3`、半径半分で上に重ねる
-  (「中の小器官」に見える)。
+## shape (ぼかす前の整形)
 
-### トレイルとの関係
+`v = field.a * fieldGain` (平均密度 = 1) として、スタイルの `shape` ごとに:
 
-- `trails` が true のときは、パス 2 の出力先を既存のトレイルテクスチャにする
-  (フェード → 合成結果を重ねる)。残像が「粘液の跡」になる。
+- occupancy (glow / mono / cell): `c = 1 - exp(-2 * max(v - threshold, 0))`。空き (ガス) は 0、構造の内部は ~1 の「占有度」。SmoothLife の場の値 (0 か 1 に近い) に当たる。これを small / large でぼかしたものが disk 平均 m、ring 平均 n。
+- compress (bands): `c = 1 - exp(-(v / 3.5)^1.8)`。密度を 0..1 に圧縮 (ガスはほぼ 0、中密度で立ち上がり、芯 (v > ~8) で飽和)。ぼかす前に飽和させるので、芯の粒子ノイズが縞に乗らない。st1 の質量 r に当たる。
+- nucleus (glass): 上と同じ圧縮 `c0` のあと `c = smoothstep(nucleusThreshold - 0.1, nucleusThreshold + 0.1, c0)`。「核 (密度が高い所) の指標」で、ガスも疎な粒の殻も 0。体・核・膜はすべてこの指標のぼかしから作る。
 
-## GUI (Display フォルダに `Organic` サブフォルダ)
+出力は `(field.rgb / field.a * c, c)`。ぼかし後の `rgb / a` が加重平均色 (種類の色)。
 
-| パラメータ | 既定 | 範囲 |
-|---|---|---|
-| `renderMode` | `'organic'` | `'dots' / 'organic'` |
-| `fieldScale` | 0.5 | 0.25 / 0.5 / 1 |
-| `splatRadius` (× rMax) | 0.6 | 0.2〜1.5 |
-| `threshold` | 0.5 | 0.05〜2 |
-| `edge` | 0.08 | 0.01〜0.3 |
-| `coreBoost` | 1.5 | 1〜4 |
-| `stretch` | 0.5 | 0〜2 |
-| `rimStrength` | 0.6 | 0〜2 |
-| `showParticles` | false | |
+## スタイル (`organicStyle`)
+
+以下 `m` = small ぼかし後の `a`、`n` = large ぼかし後の `a`、`C` = `rgb / a` (種類の平均色)。`tinted(base, C, k)` は明るさを保って色相を C へ `k` だけ寄せる。
+
+### glow
+
+st3 の式そのまま: `glow = max((1-n)^2 - (1-m)^2, 0) * 4 * glowIntensity`、色 `vec3(.6,.85,1.)` (種類の色を `speciesTint` だけ混ぜる)、
+ベース `0.2 * m + vec3(0,.2,.2) * n`。密な構造の内側の縁と穴の縁が光り、一様な内部では打ち消し合う。
+
+### glass (既定)
+
+平らな 2D イラスト風の細胞 (3D 的なライティングはしない)。背景は青、体は一定の淡い水色の半透明、縁は白い線、核は種類の色の平らな塊。
+**色の意味は核だけ** (体・膜には種類の色を混ぜない)。`m` / `n` = 核の指標 (shape) の small / large ぼかし、`Cs = s.rgb / s.a` = small ぼかしの加重平均色 (細かい)。
+輪郭はすべて `fwidth` による約 1px のアンチエイリアスで、ぼかしの強さによらず「くっきりだが少し柔らかい」平面の形になる。
+
+- 背景: 平らな青 `(.27,.57,.88)` -> `(.20,.47,.82)` のごくゆるい上下グラデーションだけ。
+- 体: `n > 0.2` の半透明の円盤 (一定の `(.62,.82,.98)`、背景に 80% で重ねる)。核の指標から作るので、核を持たないガスのかたまり・疎な粒の殻は体にならず、輪も出ない。
+- 膜: 体の輪郭の等高線 `n = 0.2` に沿った一定幅 (canvas px、半幅 `0.9 * rimStrength * dpr`) の白い線。勾配が弱い所 (平らな頂上・くびれ) では出さない。
+- 核: `m > 0.5` の内側を `Cs` で平らに塗る。細かい場 (スプラット 0.3 倍 x 0.5 = 0.15 rMax、small ぼかし 0.3 倍) の色なので、粒が作る縞 (緑 / 赤) や色の混ざりがそのまま残る。
+  縁に、自分の色を暗く (x 0.62) 少し濃くした約 1px (`1.2 * dpr`) の縁取りを付けて、淡い体から分離する。`n < 0.2` の小さな粒は核としても出さない。
+- 画面固定のノイズ・スペキュラ・陰影・屈折・ビネット・外側の輪は使わない (動いても揺らがない)。
+- glass も bands と同様に細かい場 (スプラット 0.3 倍、small ぼかし 0.3 倍)。large ぼかしは縮めない (体の輪郭に使うため)。
+
+### bands
+
+`col = max(sin(vec3(1,2,3) * bandFreq * r^3), 0)`、`r = bandBase + 0.8 * c` (c = shape で圧縮した密度をぼかしたもの)。
+
+- 空き (c = 0) は `r = bandBase = 0.24` (st1 の `density_target`)。位相 `25 * 0.24^3 ≈ 0.35` なので `sin(0.35, 0.69, 1.04) ≈ (0.34, 0.64, 0.86)` = 明るい青。画面全体がこの青で、ガスの粒子ごとのわずかな密度差が水色〜淡い青のレリーフになる。
+- 密度が上がると位相が進み、黄 -> 赤 -> 紫 -> 緑 -> 青 -> 黒 の周期を何回も通る (位相 ≈ 2π の倍数付近が黒い輪)。構造の縁は虹色の輪、芯は飽和した位相 (既定では紫) になる。
+- bands だけ、スプラット半径を 0.6 倍、small ぼかしを 0.5 倍にして細かい場にする (st1 の密度のカーネルが ~2px と細かく、筋状のレリーフになるため)。large ぼかしは使わない。
+- 控えめなエンボス: small ぼかしの密度を高さとみなし、勾配から固定光源 (左上) の陰影 `1 + 0.35 * (dot(n, L) - L.z)` を色に掛ける。
+- `speciesTint` は半分の強さで種類の色相を混ぜる。
+
+### mono
+
+`smoothstep(0, 1, mix(m, n, 0.35))` のグレースケール (わずかに種類の色)。黒地に白い柔らかい構造、粒子の無い所は黒。
+
+### cell
+
+水彩の細胞イラスト。背景はオフホワイトの紙 (画面固定の value noise で目を付ける)。
+
+- 体: `mb = mix(m, n, 0.4) + 低周波ノイズ`、`body = smoothstep(0.3, 0.62, mb)` (縁 = 占有度 0.5 付近の等高線、ノイズでやや不規則)。外側に薄い青のにじみ。
+- 色: 深さ `depth = smoothstep(0.45, 0.98, mix(m, n, 0.6))` (縁 0 -> 内部 1) で 青 `(.36,.56,.86)` -> ミント `(.72,.91,.82)` -> 淡黄 `(.99,.96,.72)`。縁に少し濃い帯 (顔料だまり)、紙の目でムラ。
+- 核: `nuc = smoothstep(nucleusThreshold ± 0.03, n + 粗いノイズ)`。縁が濃く中心がやや明るい紫。大きなぼかしがほぼ満杯の所 = 大きな塊の中心だけに出る。
+- 顆粒: splat のときに粒子の約 3% (id のハッシュ) が、向きがランダムな小さな楕円 (長軸 0.42 s、短軸 = 長軸 / 1.7) を `granule` へ加算。composite で体の内側だけ薄く暗く描く。粒子といっしょに動く。
+
+## パラメータ (`config.js` -> GUI の Display / Organic -> `renderer.js`)
+
+| パラメータ | 既定 | 範囲 (GUI) | 意味 |
+|---|---|---|---|
+| `renderMode` | `'organic'` | `dots` / `organic` | |
+| `organicStyle` | `'glass'` | `glass` / `cell` / `glow` / `bands` / `mono` | スタイル固有の項目 (`blurLarge` / `speciesTint` を含む) は、そのスタイルが読むときだけ GUI に出る |
+| `fieldScale` | 0.5 | 0.25 / 0.5 / 1 | field の解像度 (canvas に対する比)。重い場合は下げる |
+| `splatRadius` | 0.5 | 0.2〜1.5 | スプラット半径 (x rMax) |
+| `fieldGain` | 1 | 0.2〜4 | 正規化した場への倍率 (全スタイル) |
+| `blurSmall` | 0.15 | 0.05〜1.5 | small (disk) ぼかしの σ (x rMax) |
+| `blurLarge` | 0.45 | 0.3〜4 | large (ring) ぼかしの σ (x rMax)。広いときは低解像度で計算。bands は使わない |
+| `speciesTint` | 0.3 | 0〜1 | 種類の色をスタイルの色へ混ぜる量 (bands は半分の強さ、glass は使わない: 種類の色は核だけ) |
+| `threshold` | 0.6 | 0.05〜4 | cell / glow / mono: 平均密度の何倍未満を「空き」とするか |
+| `glowIntensity` | 1 | 0〜3 | glow: 輪郭の明るさ |
+| `bandFreq` | 25 | 1〜100 | bands: 縞の周波数 (位相 = `bandFreq * r^3`) |
+| `bandBase` | 0.24 | 0.05〜0.6 | bands: 空き (密度 0) の r。`bandFreq * bandBase^3 ≈ 0.35` で st1 と同じ明るい青 |
+| `nucleusThreshold` | 0.75 | 0.3〜0.99 | cell: 核が始まる large ぼかしの占有度。glass: 核 (種類の色の平らな塊) が始まる密度 (圧縮後、0..1。shape の指標のしきい値) |
+| `rimStrength` | 1.3 | 0〜2 | glass: 膜の線の太さ・濃さ |
+| `showParticles` | false | | 粒子 (半径半分、alpha 0.3) を上に重ねる |
+
+以前の `edge` / `coreBoost` / `stretch` と、旧 `threshold` (メタボールのしきい値) は廃止。`threshold` は上記の意味に変わった。
+
+## 調整のコツ (目で見て決める所)
+
+- 構造の大きさは rMax 基準 (実測: 1 つの塊の半径がおよそ 0.5〜1 rMax)。輪郭が太すぎる / 細すぎるときは `blurLarge` と `splatRadius` を同じ向きに動かす。glow は large の σ が塊の半径に近いと塊全体が光り、半径より小さいと縁だけ光る。
+- cell の核は `blurLarge` が大きいほど出にくい (n が下がる)。`nucleusThreshold` を下げるか `blurLarge` を下げる。
+- ガスが見えすぎる / 構造が痩せるときは `threshold`。
+- bands の縞が細かすぎる (ノイズに見える) ときは `bandFreq` を下げる。空きの青を変えたいときは `bandBase` (位相 `bandFreq * bandBase^3`: 0.35 = 水色、0.8 = 黄緑〜黄、1〜2 = 赤)。芯の色 (飽和したときの位相) は `bandFreq` で動く。
+
+## パレット (`src/palette.js`)
+
+種類の色は OKLCH で生成する (dots モードと行列エディタも同じパレット)。HSL の等間隔の色相 (赤・黄・緑・水色・青・マゼンタ) は、青が青い背景に溶け、水色が淡い体・白い縁と区別できず、明るさもばらばら (黄・水色は明るく青・マゼンタは暗い) だった。
+
+- 明るさ L = 0.73、彩度 C = 0.16 を基本にそろえる。ただし黄は高い L でないと黄色に見えない (そろえると泥っぽいからし色になり、赤やピンクと平均したときも茶色くなる) ので、色相 96° を中心に raised-cosine の山 (半幅 60°) で L を最大 +0.16 (黄 ≈ 0.89)、C を +0.01 持ち上げる。橙は +0.06 ほど、赤・緑・紫・ピンクは基本の L のまま。sRGB に収まらない色は色相と L を保ったまま C を下げる。明るい体の上でも暗い dots の背景の上でも読める値。
+- 色相は 295° (紫) -> マゼンタ -> 赤 -> 橙 -> 黄 -> 145° (緑) の弧に等間隔。背景の青 (OKLCH で L 0.57–0.65、C 0.14–0.15、h 251–256°) と体 (L 0.84、h 243°) の色相帯 (約 150°–290°) を避ける。6 種類なら 紫 / ピンク / 赤 / 橙 / 黄 / 緑。種類数はいくつでもよい (弧を等分する)。
+- 7 種類以上では、隣り合う色の見分けのため L を交互に ±0.05 ずらす。
+- `createPalette(n)` は従来どおり `{ numTypes, css, rgb }` を返す。css は `rgb(r g b)`。
 
 ## 実装メモ
 
-- 新規ファイル: `src/gpu/shaders/organic.wgsl.js` (splat と composite の 2 シェーダ)。
-- `renderer.js`
-  - `field` テクスチャは `ensureTrailTexture` と同様に、キャンバスサイズ × `fieldScale` で遅延生成。
-  - splat パイプラインは加算ブレンド、`rgba16float` ターゲット、`loadOp: 'clear'` (0)。
-  - composite は `textureSample` 用に `linear` サンプラを 1 つ作る。
-  - `densityA` をバインド (binding 4) に追加。`updateParticleGroup` のキーにも含める。
-- 周期境界: 画面端をまたぐ粒子は、splat の四角形が画面外にはみ出すだけで反対側に出ない。
-  端で途切れるのが気になる場合は、端から `splatRadius` 以内の粒子だけ追加インスタンス
-  (最大 4 コピー) を描く。最初は対応しなくてよい。
-- 色空間: 既存どおりガンマ空間のまま加算して問題ない (平均色を取るので)。
-- `RenderParams` に項目を足すときは 16 バイト境界 (vec2f は 8 バイト) に注意する。
-
-## 性能目標
-
-- 30,000 粒子、1920×1080、fieldScale 0.5 で、描画 GPU 時間が既存の点描画の 2 倍以内。
-- splat の四角形はフィールド解像度で数十 px 程度になるので、オーバードローが主なコスト。
-  重い場合は `fieldScale` を下げる / `splatRadius` を下げる。
+- `src/organicStyles.js`: スタイル表 (上記)。
+- `src/gpu/shaders/organic.wgsl.js`: `splatWGSL` / `shapeWGSL` / `downsampleWGSL` / `blurWGSL` / `compositeWGSL`。`OrganicParams` は 13 個の 4 バイト値 (52 バイト。style / shape だけ u32)。フィールド名は config.js の項目名と同じで、JS 側の `ORGANIC_FIELDS` と WGSL の struct の一致は起動時に `assertOrganicLayout` (common.wgsl.js の `assertStructLayout`) が確認する。`BlurParams` は 288 バイト。全画面三角形の頂点シェーダ `FULLSCREEN_VS` は render.wgsl.js のものを fade / blit / organic で共有する。
+- `src/gpu/renderer.js`: `updateOrganicLayout` (field の解像度・σ・縮小段数)、`ensureOrganicPlan` / `buildOrganicPlan` (テクスチャ・パス・バインドグループ)、`drawOrganic`、`writeOrganicUniform` (変わったときだけアップロード)、`writeBlurUniforms`、`writeGaussianTaps`。
+- `trails` は organic では無視 (dots に戻したときは従来どおり)。`densityA` は読まない (simulation.js の `needDensity` も無くした。density パスは圧縮の制限が有効なときだけ走る)。
+- 性能の目安 (60,000 粒子、1920x1080、fieldScale 0.5、Intel UHD (内蔵 GPU)、描画 GPU 時間): glass ≈ 4.3 ms、bands ≈ 4.7 ms、cell ≈ 11 ms (ノイズが重い)、glow / mono ≈ 7.3 ms。dots は 0.5 ms。
+- 周期境界: splat の端のコピーとブラーの repeat サンプラで、画面の端でも輪郭が途切れない。縮小 (downsample) だけは端をクランプする (奇数サイズのときの最後の 1 テクセルだけ影響)。
 
 ## 受け入れ基準
 
-1. `renderMode = 'dots'` で現在と同一の見た目 (回帰なし)。
-2. `organic` でクラスタが滑らかな輪郭の塊になり、孤立した粒子は小さな丸い粒に見える。
-3. 密度の高い構造の芯が暗く、縁に明るいリムが出る。
-4. 異なる type が接する部分で色が滑らかに混ざる。
-5. ウィンドウリサイズ・DPR 変更・trails の ON/OFF で破綻しない。
-6. WebGPU の validation エラーがコンソールに出ない。
+1. `renderMode = 'dots'` で従来と同一の見た目 (回帰なし)。
+2. 各スタイルが参考の見た目 (上記) の方向になる: glass = 青い平らな背景に白い縁の半透明の細胞と、種類の色の平らな核 (中の縞・混ざりも dots と同じに読める)、glow = 暗い内部と光る輪郭、bands = 画面全体が明るい青で、構造が虹色の輪になり芯は紫、mono = 黒地に白い構造、cell = 青->ミント->淡黄の体 + 紫の核 + 顆粒。
+3. 粒子数・画面サイズ・rMax を変えても極端に暗く / 明るくならない (場は平均密度で正規化)。
+4. ウィンドウリサイズ・DPR 変更・trails の ON/OFF・スタイル / 半径の変更で破綻しない。
+5. WebGPU の validation エラーがコンソールに出ない。

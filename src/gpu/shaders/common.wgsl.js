@@ -76,13 +76,17 @@ fn wrapPos(v: f32, size: f32) -> f32 {
 `;
 
 /**
- * WGSL の struct Params と JS 側の PARAMS_STRUCT_FIELDS (writeUniforms が書く順) が
+ * WGSL の struct <structName> と JS 側のフィールド一覧 (uniform を書く順) が
  * 食い違っていないか、起動時に確認する (食い違うと値が黙ってずれるため)。
  */
-export function assertParamsLayout() {
-    const body = /struct Params \{([^}]*)\}/.exec(COMMON_WGSL)?.[1] ?? '';
+export function assertStructLayout(source, structName, fields) {
+    const body = new RegExp(`struct ${structName} \\{([^}]*)\\}`).exec(source)?.[1] ?? '';
     const names = [...body.matchAll(/^\s*(\w+)\s*:/gm)].map((m) => m[1]);
-    if (names.join() !== PARAMS_STRUCT_FIELDS.join()) {
-        throw new Error(`Params struct (WGSL) and PARAMS_STRUCT_FIELDS (JS) are out of sync:\n${names.join()}\n${PARAMS_STRUCT_FIELDS.join()}`);
+    if (names.join() !== fields.join()) {
+        throw new Error(`${structName} struct (WGSL) and its JS field list are out of sync:\n${names.join()}\n${fields.join()}`);
     }
+}
+
+export function assertParamsLayout() {
+    assertStructLayout(COMMON_WGSL, 'Params', PARAMS_STRUCT_FIELDS);
 }

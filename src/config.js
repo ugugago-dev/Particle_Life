@@ -38,15 +38,23 @@ export const defaults = Object.freeze({
     trails: false,
     showMatrix: true,
 
-    // organic rendering (screen-space metaballs; see docs/organic-rendering-spec.md)
+    // organic rendering (screen-space density field; see docs/organic-rendering-spec.md)
+    // The splatted field is normalised so that the world's mean density reads 1.0 (robust to N, canvas size, rMax);
+    // fieldGain scales it. Blur radii are Gaussian sigmas in x rMax.
     renderMode: 'organic',   // 'dots' | 'organic'
+    organicStyle: 'glass',   // 'glass' | 'cell' | 'glow' | 'bands' | 'mono'
     fieldScale: 0.5,         // field texture resolution relative to the canvas
-    splatRadius: 0.7,        // x rMax
-    threshold: 0.5,          // membrane threshold on the accumulated field
-    edge: 0.08,              // softness of the membrane edge
-    coreBoost: 1.5,          // field weight of densely packed particles (dark nucleus)
-    stretch: 0.5,            // elongation along the velocity
-    rimStrength: 0.8,
+    splatRadius: 0.5,        // x rMax
+    fieldGain: 1,            // multiplier on the normalised field (all styles)
+    blurSmall: 0.15,         // x rMax, the "disk" (small) blur
+    blurLarge: 0.45,         // x rMax, the "ring" (large) blur (computed at reduced resolution when wide)
+    speciesTint: 0.3,        // how much of the particle-type colour is mixed into the style colours (0 = none)
+    glowIntensity: 1,        // glow: brightness of the outline
+    bandFreq: 25,            // bands: sin(vec3(1,2,3) * bandFreq * r^3), r = bandBase + 0.8 * compressed density
+    bandBase: 0.24,          // bands: r of empty space (st1's density_target); bandFreq * bandBase^3 ~ 0.35 = light blue
+    threshold: 0.6,          // density (x mean) below which cell/glow/mono see "empty" (the sparse gas between structures)
+    nucleusThreshold: 0.75,  // cell: how full the large-blur neighbourhood must be (0..1) for the nucleus to start; glass: compressed density (0..1) where the flat core starts
+    rimStrength: 1.3,        // glass: thickness/opacity of the white membrane line
     showParticles: false,    // overlay the dots (faint) on top of the organic look
 });
 

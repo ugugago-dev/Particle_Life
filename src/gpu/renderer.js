@@ -10,29 +10,50 @@
 //     trails:         boolean                                 フェードさせながら重ね描き
 //     pointer:        { x, y, active, mode }                  ワールド座標、mode +1 引力 / -1 斥力
 //     pointerRadius:  number                                  ワールド単位
-//     rMax, maxSpeed, restDensity: number                     organic のスプラット半径 / 伸び / 密度の基準
-//     organic:        { renderMode, fieldScale, splatRadius, threshold, edge, coreBoost, stretch,
-//                       rimStrength, showParticles }          config.js の Organic 項目
+//     rMax:           number                                  organic のスプラット / ぼかし半径 (x rMax) と密度の正規化
+//     organic:        { renderMode, organicStyle, fieldScale, splatRadius, fieldGain, blurSmall, blurLarge,
+//                       glowIntensity, bandFreq, bandBase, threshold, nucleusThreshold, rimStrength,
+//                       speciesTint, showParticles }
+//                                                             config.js の Organic 項目。スタイルごとの違い (使うパス・
+//                                                             スタイル固有の項目) は organicStyles.js の表
 //   }
 //
 // トレイルなし: canvas に BG クリア -> パーティクル -> ポインタ円 を 1 パスで描く。
-//
-// organic モード (docs/organic-rendering-spec.md): 先に field テクスチャ (rgba16float, canvas x fieldScale) へ
-// 粒子を加算スプラットし、パーティクル描画の代わりに field をしきい値処理した合成 (メタボール) を描く。
 // トレイルあり: 永続テクスチャ (rgba16float) を BG で薄くフェード -> パーティクルを重ね描き、
 //               そのあと canvas へ等倍コピー -> ポインタ円 (円はトレイルに残さない)。
+//
+// organic モード (docs/organic-rendering-spec.md): トレイルは無視して、不透明な全画面を描く。
+//   1. splat      : 粒子を field (rgba16float, canvas x fieldScale) に加算 (cell だけ顆粒テクスチャ r16float に MRT)
+//   2. shape      : field をスタイルの shape (occupancy / compress / nucleus) で 0..1 の指標に整形
+//   3. downsample : ブラーの σ が大きいときだけ、1/2 ずつ縮小 (ピラミッド)
+//   4. blur       : small (disk) と large (ring) の分離ガウス (水平 -> 垂直)。それぞれ必要なら低解像度で
+//                   (large を使わないスタイルは large を作らない)
+//   5. composite  : スタイル (glass / cell / glow / bands / mono) で着色して canvas へ -> パーティクル (任意) -> ポインタ円
 
 import { createShaderModule, withErrorScope } from './device.js';
 import {
     MAX_PALETTE, RENDER_UNIFORM_FLOATS,
     particleWGSL, fadeWGSL, blitWGSL, pointerWGSL,
 } from './shaders/render.wgsl.js';
-import { ORGANIC_UNIFORM_FLOATS, splatWGSL, compositeWGSL } from './shaders/organic.wgsl.js';
+import {
+    ORGANIC_FIELDS, ORGANIC_UNIFORM_FLOATS, BLUR_UNIFORM_FLOATS, BLUR_MAX_PAIRS, assertOrganicLayout,
+    splatWGSL, shapeWGSL, downsampleWGSL, blurWGSL, compositeWGSL,
+} from './shaders/organic.wgsl.js';
+import { ORGANIC_STYLES, SHAPE_INDEX } from '../organicStyles.js';
 
 const BG = { r: 1 / 255, g: 14 / 255, b: 29 / 255, a: 1 };   // style.css の --bg
 const TRAIL_FORMAT = 'rgba16float';  // 8bit だとフェードの丸めで残像が消えきらないため
-const FIELD_FORMAT = 'rgba16float';  // 加算ブレンド可能で、色 x 重みが 1 を超えても飽和しない
+const FIELD_FORMAT = 'rgba16float';  // 加算ブレンド可能で、色 x 重みが 1 を超えても飽和しない (ぼかしの中間も同じ)
+const GRANULE_FORMAT = 'r16float';   // 顆粒 (cell の小器官)。1 チャンネルで足りる。16bit float は加算ブレンド可能
 const TRAIL_FADE = 0.14;             // Canvas2D 版と同じ (小さいほど長く残る)
+
+const SIGMA_MAX_TEXELS = 5;          // 1 方向のぼかしの σ の上限 (テクセル)。超える分は解像度を 1/2 ずつ落として収める
+const MAX_BLUR_LEVEL = 6;            // 縮小の段数の上限 (1/64)
+
+// OrganicParams のフィールド位置 (organic.wgsl.js の ORGANIC_FIELDS の順)
+const OF = Object.fromEntries(ORGANIC_FIELDS.map((name, i) => [name, i]));
+// config.js の項目をそのままコピーするフィールド (同名)。残り (weightNorm, splatRadius, style, shape, dpr) は計算して入れる
+const COPIED_PARAMS = ['fieldGain', 'glowIntensity', 'bandFreq', 'threshold', 'nucleusThreshold', 'speciesTint', 'bandBase', 'rimStrength'];
 
 const ALPHA_BLEND = {
     color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
@@ -44,6 +65,42 @@ const ADDITIVE_BLEND = {
     alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
 };
 
+/** σ (field の px) のガウシアンを 1 方向 SIGMA_MAX_TEXELS 以下に収めるのに必要な縮小の段数 (1 段 = 1/2)。 */
+function blurLevel(sigmaPx) {
+    const k = Math.ceil(Math.log2(Math.max(sigmaPx, 1e-3) / SIGMA_MAX_TEXELS));
+    return Math.min(MAX_BLUR_LEVEL, Math.max(0, k));
+}
+
+/**
+ * σ (テクセル) の離散ガウシアン (半径 3σ) を、バイリニアの「2 テクセルを 1 フェッチ」にまとめたタップ表にして
+ * out[base...] (vec4 単位) に書く。out[base] = 中心 (offset 0, weight)、続く各 vec4 = 左右対称のペア (offset, weight)。
+ * 隣り合う 2 テクセル i, i+1 (重み wa, wb) を、位置 (i*wa + (i+1)*wb) / (wa + wb) の 1 回のバイリニアで置き換える。
+ * @returns {number} ペアの数 (フェッチ数は 1 + 2 * ペア数)
+ */
+const TAP_WEIGHTS = new Float64Array(2 * BLUR_MAX_PAIRS + 1);   // writeGaussianTaps の作業用 (半径の上限 + 1)
+
+function writeGaussianTaps(out, base, sigma) {
+    const s = Math.max(sigma, 0.3);
+    const radius = Math.min(Math.ceil(3 * s), 2 * BLUR_MAX_PAIRS);
+    const w = TAP_WEIGHTS;
+    let total = 0;
+    for (let i = 0; i <= radius; i++) {
+        w[i] = Math.exp(-0.5 * (i / s) * (i / s));
+        total += i === 0 ? w[i] : 2 * w[i];
+    }
+    out[base] = 0;
+    out[base + 1] = w[0] / total;
+    let pairs = 0;
+    for (let i = 1; i <= radius; i += 2) {
+        const wa = w[i];
+        const wb = i + 1 <= radius ? w[i + 1] : 0;
+        pairs++;
+        out[base + 4 * pairs] = (i * wa + (i + 1) * wb) / (wa + wb);
+        out[base + 4 * pairs + 1] = (wa + wb) / total;
+    }
+    return pairs;
+}
+
 export class GpuRenderer {
     /**
      * @param {GPUDevice} device
@@ -52,6 +109,7 @@ export class GpuRenderer {
      * @param {HTMLCanvasElement} canvas
      */
     static async create(device, context, format, canvas) {
+        assertOrganicLayout();
         const r = new GpuRenderer(device, context, format, canvas);
         await r.createPipelines();
         return r;
@@ -85,29 +143,46 @@ export class GpuRenderer {
         this.particleGroup = null;
         this.particleGroupKey = null; // [posVelA, metaA] が変わったら作り直す
 
+        // OrganicParams (ORGANIC_FIELDS の順)。style / shape だけ u32 なので同じバッファの u32 ビューで書く。
+        // 値が変わったときだけアップロードする (前回送った値をビットで比較)
         this.organicData = new Float32Array(ORGANIC_UNIFORM_FLOATS);
+        this.organicU32 = new Uint32Array(this.organicData.buffer);
+        this.organicSent = new Uint32Array(ORGANIC_UNIFORM_FLOATS);
         this.organicBuffer = device.createBuffer({
             label: 'organic params',
             size: ORGANIC_UNIFORM_FLOATS * 4,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
-        this.fieldSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
-        this.fieldTexture = null;
-        this.fieldView = null;
-        this.compositeGroup = null;   // { canvas, trail } (パイプラインごとに auto layout が別)
-        this.splatGroup = null;
-        this.splatGroupKey = null;    // [posVelA, metaA, densityA]
+        // ブラーのパス (small / large x 水平 / 垂直) ごとに別のタップ表 (σ が変わったパスだけ書き直す)
+        this.blurData = new Float32Array(BLUR_UNIFORM_FLOATS);
+        this.blurU32 = new Uint32Array(this.blurData.buffer);          // count (u32)
+        this.blurBuffers = Object.fromEntries(['smallH', 'smallV', 'largeH', 'largeV'].map((name) => [name, device.createBuffer({
+            label: `organic blur ${name}`,
+            size: BLUR_UNIFORM_FLOATS * 4,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        })]));
+        // ワールドは周期境界なので repeat (端のぼかしが反対側から回り込む。splat も端をまたぐ分を反対側に描く)
+        this.fieldSampler = device.createSampler({
+            magFilter: 'linear', minFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat',
+        });
+        this.organicLayout = { fw: 0, fh: 0, sigmaSmall: 0, sigmaLarge: 0, ks: 0, kl: 0 };   // 毎フレーム更新 (updateOrganicLayout)
+        this.organicPlan = null;      // 中間テクスチャ・パス・バインドグループ (ensureOrganicPlan)
+        this.splatGroups = null;      // { plain, granule } (パイプラインごとに auto layout が別)
+        this.splatGroupKey = null;    // [posVelA, metaA]
     }
 
     async createPipelines() {
         const { device, format } = this;
         await withErrorScope(device, 'render pipelines', async () => {
-            const [particle, fade, blit, pointer, splat, composite] = await Promise.all([
+            const [particle, fade, blit, pointer, splat, shape, downsample, blur, composite] = await Promise.all([
                 createShaderModule(device, 'particle', particleWGSL),
                 createShaderModule(device, 'fade', fadeWGSL),
                 createShaderModule(device, 'blit', blitWGSL),
                 createShaderModule(device, 'pointer', pointerWGSL),
                 createShaderModule(device, 'organic splat', splatWGSL),
+                createShaderModule(device, 'organic shape', shapeWGSL),
+                createShaderModule(device, 'organic downsample', downsampleWGSL),
+                createShaderModule(device, 'organic blur', blurWGSL),
                 createShaderModule(device, 'organic composite', compositeWGSL),
             ]);
             const target = (fmt, blend) => [{ format: fmt, blend }];
@@ -118,23 +193,32 @@ export class GpuRenderer {
                 fragment: { module: particle, entryPoint: 'fs', targets: target(fmt, ALPHA_BLEND) },
                 primitive: { topology: 'triangle-list' },
             });
-            const compositePipeline = (fmt) => device.createRenderPipeline({
-                label: `organic composite -> ${fmt}`,
+            // 全画面三角形 + ブレンドなし (downsample / blur は field 形式へ、composite は canvas へ書き切る)
+            const fullscreenPipeline = (label, module, fmt) => device.createRenderPipeline({
+                label,
                 layout: 'auto',
-                vertex: { module: composite, entryPoint: 'vs' },
-                fragment: { module: composite, entryPoint: 'fs', targets: target(fmt, ALPHA_BLEND) },
+                vertex: { module, entryPoint: 'vs' },
+                fragment: { module, entryPoint: 'fs', targets: target(fmt) },
+                primitive: { topology: 'triangle-list' },
+            });
+            const splatPipeline = (label, entryPoint, targets) => device.createRenderPipeline({
+                label,
+                layout: 'auto',
+                vertex: { module: splat, entryPoint: 'vs' },
+                fragment: { module: splat, entryPoint, targets },
                 primitive: { topology: 'triangle-list' },
             });
             this.pipelines = {
-                splat: device.createRenderPipeline({
-                    label: 'organic splat',
-                    layout: 'auto',
-                    vertex: { module: splat, entryPoint: 'vs' },
-                    fragment: { module: splat, entryPoint: 'fs', targets: target(FIELD_FORMAT, ADDITIVE_BLEND) },
-                    primitive: { topology: 'triangle-list' },
-                }),
-                compositeToCanvas: compositePipeline(format),
-                compositeToTrail: compositePipeline(TRAIL_FORMAT),
+                // field だけ (cell 以外) / field + 顆粒の MRT (cell)
+                splat: splatPipeline('organic splat', 'fs', [{ format: FIELD_FORMAT, blend: ADDITIVE_BLEND }]),
+                splatGranule: splatPipeline('organic splat + granule', 'fsGranule', [
+                    { format: FIELD_FORMAT, blend: ADDITIVE_BLEND },
+                    { format: GRANULE_FORMAT, blend: ADDITIVE_BLEND },
+                ]),
+                shape: fullscreenPipeline('organic shape', shape, FIELD_FORMAT),
+                downsample: fullscreenPipeline('organic downsample', downsample, FIELD_FORMAT),
+                blur: fullscreenPipeline('organic blur', blur, FIELD_FORMAT),
+                composite: fullscreenPipeline('organic composite', composite, format),
                 particleToCanvas: particlePipeline(format),
                 particleToTrail: particlePipeline(TRAIL_FORMAT),
                 fade: device.createRenderPipeline({
@@ -183,52 +267,155 @@ export class GpuRenderer {
         this.needsTrailClear = true; // トレイルテクスチャは次の draw で作り直す
     }
 
-    /** field テクスチャ (canvas x fieldScale) と、それを読む composite のバインドグループを作る。 */
-    ensureField(scale) {
-        const { canvas, device } = this;
-        const w = Math.max(1, Math.round(canvas.width * scale));
-        const h = Math.max(1, Math.round(canvas.height * scale));
-        const t = this.fieldTexture;
-        if (t && t.width === w && t.height === h) return;
-        if (t) t.destroy();
-        this.fieldTexture = device.createTexture({
-            label: 'organic field',
-            size: [w, h],
-            format: FIELD_FORMAT,
-            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-        });
-        this.fieldView = this.fieldTexture.createView();
-        const group = (pipeline) => device.createBindGroup({
-            layout: pipeline.getBindGroupLayout(0),
+    /**
+     * organic のスタイルと画面から、field の解像度とブラーの σ (field の px) / 縮小の段数を決める (this.organicLayout を更新)。
+     * large を使わないスタイルは kl = -1 (large のブラーを作らない)。
+     */
+    updateOrganicLayout(org, style, rMax, worldH) {
+        const { canvas, organicLayout: L } = this;
+        L.fw = Math.max(1, Math.round(canvas.width * org.fieldScale));
+        L.fh = Math.max(1, Math.round(canvas.height * org.fieldScale));
+        const pxPerWorld = L.fh / worldH;
+        L.sigmaSmall = Math.max(org.blurSmall * style.fine.small * rMax * pxPerWorld, 0.3);
+        L.sigmaLarge = Math.max(org.blurLarge * style.fine.large * rMax * pxPerWorld, 0.3);
+        L.ks = blurLevel(L.sigmaSmall);
+        L.kl = style.params.includes('blurLarge') ? blurLevel(L.sigmaLarge) : -1;
+        return L;
+    }
+
+    /**
+     * organic の中間テクスチャとパス (整形 / 縮小 / ブラー / 合成) の計画を、field サイズ・ブラーの縮小段数・
+     * スタイルが使うもの (large / 顆粒) が変わったときだけ作り直す。リサイズ・fieldScale・ブラー半径・スタイルの変更で呼ばれる。
+     * @returns {object} plan
+     */
+    ensureOrganicPlan(L, style) {
+        const p = this.organicPlan;
+        if (!p || p.fw !== L.fw || p.fh !== L.fh || p.ks !== L.ks || p.kl !== L.kl || p.granules !== style.granules) {
+            this.destroyOrganicPlan();
+            this.organicPlan = this.buildOrganicPlan(L, style.granules);
+        }
+        return this.organicPlan;
+    }
+
+    destroyOrganicPlan() {
+        const plan = this.organicPlan;
+        if (!plan) return;
+        for (const t of plan.textures) t.destroy();
+        this.organicPlan = null;
+    }
+
+    buildOrganicPlan({ fw, fh, ks, kl }, granules) {
+        const { device, pipelines } = this;
+        const textures = [];
+        const make = (label, w, h, format = FIELD_FORMAT) => {
+            const texture = device.createTexture({
+                label: `organic ${label}`,
+                size: [w, h],
+                format,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+            });
+            textures.push(texture);
+            return { view: texture.createView(), w, h };
+        };
+
+        // field: splat の出力 (密度そのもの)。levels[0]: それを shape で整形したもの。
+        // 解像度ピラミッド: levels[k] = levels[0] の 1/2^k (偶数でなければ切り上げ)。ブラーは levels から読む
+        const field = make('field', fw, fh);
+        const levels = [make('shaped', fw, fh)];
+        for (let k = 1; k <= Math.max(ks, kl); k++) {
+            const prev = levels[k - 1];
+            levels.push(make(`level ${k}`, Math.max(1, Math.ceil(prev.w / 2)), Math.max(1, Math.ceil(prev.h / 2))));
+        }
+        const granule = granules ? make('granule', fw, fh, GRANULE_FORMAT) : null;
+
+        const passes = [{    // 実行順。どれも全画面三角形 (draw(3))、書き込み先は target
+            label: 'organic shape',
+            pipeline: pipelines.shape,
+            target: levels[0].view,
+            group: device.createBindGroup({
+                layout: pipelines.shape.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: this.organicBuffer } },
+                    { binding: 1, resource: field.view },
+                ],
+            }),
+        }];
+        for (let k = 1; k < levels.length; k++) {
+            passes.push({
+                label: `organic downsample ${k}`,
+                pipeline: pipelines.downsample,
+                target: levels[k].view,
+                group: device.createBindGroup({
+                    layout: pipelines.downsample.getBindGroupLayout(0),
+                    entries: [{ binding: 0, resource: levels[k - 1].view }],
+                }),
+            });
+        }
+        // ブラー: level k で 水平 (src -> tmp) -> 垂直 (tmp -> out)
+        const blurs = [];    // passes の部分集合。タップ表の更新用 (branch, axis, w, h, 前回の σ)
+        const blurPair = (branch, k) => {
+            const lv = levels[k];
+            const tmp = make(`${branch} blur tmp`, lv.w, lv.h);
+            const out = make(`${branch} blur`, lv.w, lv.h);
+            const add = (name, axis, src, dst) => {
+                const pass = {
+                    label: `organic blur ${name}`,
+                    pipeline: pipelines.blur,
+                    target: dst.view,
+                    group: device.createBindGroup({
+                        layout: pipelines.blur.getBindGroupLayout(0),
+                        entries: [
+                            { binding: 0, resource: { buffer: this.blurBuffers[name] } },
+                            { binding: 1, resource: src.view },
+                            { binding: 2, resource: this.fieldSampler },
+                        ],
+                    }),
+                    buffer: this.blurBuffers[name], branch, axis, w: lv.w, h: lv.h, sigmaTexels: NaN,
+                };
+                passes.push(pass);
+                blurs.push(pass);
+            };
+            add(`${branch}H`, 0, lv, tmp);
+            add(`${branch}V`, 1, tmp, out);
+            return out;
+        };
+        const small = blurPair('small', ks);
+        const large = kl >= 0 ? blurPair('large', kl) : small;    // large を使わないスタイルは small を入れておく (読まれない)
+
+        const compositeGroup = device.createBindGroup({
+            layout: pipelines.composite.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: this.uniformBuffer } },
                 { binding: 1, resource: { buffer: this.organicBuffer } },
-                { binding: 2, resource: this.fieldView },
-                { binding: 3, resource: this.fieldSampler },
+                { binding: 2, resource: this.fieldSampler },
+                { binding: 3, resource: small.view },
+                { binding: 4, resource: large.view },
+                { binding: 5, resource: (granule ?? small).view },    // 顆粒は cell だけ (ほかは読まれない)
             ],
         });
-        this.compositeGroup = {
-            canvas: group(this.pipelines.compositeToCanvas),
-            trail: group(this.pipelines.compositeToTrail),
+
+        return {
+            fw, fh, ks, kl, granules, textures, passes, blurs, compositeGroup,
+            fieldView: field.view, granuleView: granule?.view ?? null,
         };
     }
 
     updateSplatGroup(sim) {
-        const { posVelA, metaA, densityA } = sim.buffers;
+        const { posVelA, metaA } = sim.buffers;
         const k = this.splatGroupKey;
-        if (k && k[0] === posVelA && k[1] === metaA && k[2] === densityA) return;
-        this.splatGroupKey = [posVelA, metaA, densityA];
-        this.splatGroup = this.device.createBindGroup({
-            layout: this.pipelines.splat.getBindGroupLayout(0),
+        if (k && k[0] === posVelA && k[1] === metaA) return;
+        this.splatGroupKey = [posVelA, metaA];
+        const group = (pipeline) => this.device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: this.uniformBuffer } },
                 { binding: 1, resource: { buffer: this.paletteBuffer } },
                 { binding: 2, resource: { buffer: posVelA } },
                 { binding: 3, resource: { buffer: metaA } },
-                { binding: 4, resource: { buffer: densityA } },
-                { binding: 5, resource: { buffer: this.organicBuffer } },
+                { binding: 4, resource: { buffer: this.organicBuffer } },
             ],
         });
+        this.splatGroups = { plain: group(this.pipelines.splat), granule: group(this.pipelines.splatGranule) };
     }
 
     ensureTrailTexture() {
@@ -315,7 +502,6 @@ export class GpuRenderer {
         const org = view.organic;
         const organic = org?.renderMode === 'organic' && count > 0;
         // organic のとき粒子は「中の小器官」として半径半分・薄く重ねる (showParticles)
-        const dots = !organic || org.showParticles;
         if (organic) {
             u[4] *= 0.5;
             u[11] = 0.3;
@@ -329,30 +515,19 @@ export class GpuRenderer {
         const bgClear = { r: BG.r, g: BG.g, b: BG.b, a: 1 };
 
         if (organic) {
-            this.ensureField(org.fieldScale);
-            this.writeOrganicUniform(view, world);
-            this.updateSplatGroup(sim);
-            const splatPass = encoder.beginRenderPass({
-                label: 'organic splat',
-                colorAttachments: [{
-                    view: this.fieldView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store',
-                }],
-                timestampWrites: timer?.drawBeginWrites(),
-            });
-            splatPass.setPipeline(pipelines.splat);
-            splatPass.setBindGroup(0, this.splatGroup);
-            splatPass.draw(6, count);
-            splatPass.end();
+            // organic はトレイルを使わない (不透明な全画面)。次にトレイルを有効にしたときは BG から始める
+            this.drawOrganic(encoder, sim, view, canvasView, { dots: !!org.showParticles, pointerOn, timer });
+            this.needsTrailClear = true;
+            return;
         }
 
         if (!view.trails) {
             const pass = encoder.beginRenderPass({
                 label: 'draw',
                 colorAttachments: [{ view: canvasView, clearValue: bgClear, loadOp: 'clear', storeOp: 'store' }],
-                timestampWrites: organic ? timer?.drawEndWrites() : timer?.drawWrites(),
+                timestampWrites: timer?.drawWrites(),
             });
-            if (organic) this.drawComposite(pass, pipelines.compositeToCanvas, this.compositeGroup.canvas);
-            if (dots) this.drawParticles(pass, pipelines.particleToCanvas, this.particleGroup.canvas, count);
+            this.drawParticles(pass, pipelines.particleToCanvas, this.particleGroup.canvas, count);
             if (pointerOn) this.drawPointer(pass);
             pass.end();
             this.needsTrailClear = true; // 次にトレイルを有効にしたときは BG から始める
@@ -371,15 +546,14 @@ export class GpuRenderer {
                 loadOp: clear ? 'clear' : 'load',
                 storeOp: 'store',
             }],
-            timestampWrites: organic ? undefined : timer?.drawBeginWrites(),
+            timestampWrites: timer?.drawBeginWrites(),
         });
         if (!clear) {
             trailPass.setPipeline(pipelines.fade);
             trailPass.setBindGroup(0, this.fadeGroup);
             trailPass.draw(3);
         }
-        if (organic) this.drawComposite(trailPass, pipelines.compositeToTrail, this.compositeGroup.trail);
-        if (dots) this.drawParticles(trailPass, pipelines.particleToTrail, this.particleGroup.trail, count);
+        this.drawParticles(trailPass, pipelines.particleToTrail, this.particleGroup.trail, count);
         trailPass.end();
 
         // ---- canvas へコピー + ポインタ円
@@ -395,33 +569,103 @@ export class GpuRenderer {
         finalPass.end();
     }
 
-    writeOrganicUniform(view, world) {
+    /** organic: splat -> shape -> (縮小) -> ブラー -> 合成 を encoder に積む。canvas は不透明に塗り切る。 */
+    drawOrganic(encoder, sim, view, canvasView, { dots, pointerOn, timer }) {
+        const { pipelines } = this;
         const org = view.organic;
-        const o = this.organicData;
-        const fw = this.fieldTexture.width;
-        const fh = this.fieldTexture.height;
-        const splatRadius = org.splatRadius * view.rMax;
-        // 勾配はテクセル単位なので、スプラット半径 (テクセル数) で正規化して傾きを解像度に依存させない
-        const radiusTexels = splatRadius * fh / world.height;
-        o[0] = fw; o[1] = fh;
-        o[2] = splatRadius;
-        o[3] = org.stretch;
-        o[4] = view.maxSpeed;
-        o[5] = view.restDensity;
-        o[6] = org.coreBoost;
-        o[7] = org.threshold;
-        o[8] = org.edge;
-        o[9] = org.rimStrength;
-        o[10] = radiusTexels * 0.6;
-        // 半径 s*rMax の円内の粒子数 ~ 6 * density * s^2、カーネルの平均 = 1/4
-        o[11] = 1 / Math.max(1.5 * view.restDensity * org.splatRadius * org.splatRadius, 1e-3);
-        this.device.queue.writeBuffer(this.organicBuffer, 0, o);
+        const style = ORGANIC_STYLES[org.organicStyle];
+        const count = sim.count;
+        const layout = this.updateOrganicLayout(org, style, view.rMax, sim.world.height);
+        const plan = this.ensureOrganicPlan(layout, style);
+        this.writeOrganicUniform(org, style, view.rMax, sim);
+        this.writeBlurUniforms(plan, layout);
+        this.updateSplatGroup(sim);
+
+        // 1. splat: field (色 x w, w)。cell は顆粒も同時に (MRT)。instance = 粒子 x 4 (周期境界のコピー、splatWGSL 参照)
+        const clear = { r: 0, g: 0, b: 0, a: 0 };
+        const colorAttachments = [{ view: plan.fieldView, clearValue: clear, loadOp: 'clear', storeOp: 'store' }];
+        if (plan.granuleView) colorAttachments.push({ view: plan.granuleView, clearValue: clear, loadOp: 'clear', storeOp: 'store' });
+        const splatPass = encoder.beginRenderPass({
+            label: 'organic splat',
+            colorAttachments,
+            timestampWrites: timer?.drawBeginWrites(),
+        });
+        splatPass.setPipeline(plan.granuleView ? pipelines.splatGranule : pipelines.splat);
+        splatPass.setBindGroup(0, plan.granuleView ? this.splatGroups.granule : this.splatGroups.plain);
+        splatPass.draw(6, count * 4);
+        splatPass.end();
+
+        // 2-3. 整形 + 縮小 + ブラー (全画面三角形、書き切るので clear)
+        for (const p of plan.passes) {
+            const pass = encoder.beginRenderPass({
+                label: p.label,
+                colorAttachments: [{ view: p.target, clearValue: clear, loadOp: 'clear', storeOp: 'store' }],
+            });
+            pass.setPipeline(p.pipeline);
+            pass.setBindGroup(0, p.group);
+            pass.draw(3);
+            pass.end();
+        }
+
+        // 4. 合成 (+ 粒子の重ね描き + ポインタ円)
+        const pass = encoder.beginRenderPass({
+            label: 'organic composite',
+            colorAttachments: [{ view: canvasView, clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
+            timestampWrites: timer?.drawEndWrites(),
+        });
+        pass.setPipeline(pipelines.composite);
+        pass.setBindGroup(0, plan.compositeGroup);
+        pass.draw(3);
+        if (dots) this.drawParticles(pass, pipelines.particleToCanvas, this.particleGroup.canvas, count);
+        if (pointerOn) this.drawPointer(pass);
+        pass.end();
     }
 
-    drawComposite(pass, pipeline, group) {
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, group);
-        pass.draw(3);
+    writeOrganicUniform(org, style, rMax, sim) {
+        const f = this.organicData;
+        const u = this.organicU32;
+        const world = sim.world;
+        // field の正規化: 画面全体の平均密度のとき field = 1 (粒子数・画面サイズ・rMax に依存しない)。
+        // 密度 ρ (重み付き近傍数 Σ(1 - r/rMax)^2) の一様な場は、粒子数密度 n = 6ρ / (π rMax^2)。
+        // カーネル (1 - d^2)^3 の面積は π s^2 / 4 (s = スプラット半径) なので、粒子 1 個の重み w で
+        // field = w * n * π s^2 / 4 = 1.5 * w * ρ * (s / rMax)^2。ρ = 平均密度 = N π rMax^2 / (6 A) のとき field = 1。
+        // 構造の芯は平均の数倍〜10 倍になる (圧縮の制限が弱いとき)。
+        // 平均密度の下限 0.5: 粒子がほとんど無いときに重みが発散しないように (通常の画面は ~10 以上なので影響しない)。
+        const meanDensity = Math.max(sim.count / (world.width * world.height) * Math.PI * rMax * rMax / 6, 0.5);
+        const splatRadius = org.splatRadius * style.fine.splat;
+        f[OF.weightNorm] = 1 / Math.max(1.5 * meanDensity * splatRadius * splatRadius, 1e-3);
+        f[OF.splatRadius] = splatRadius * rMax;
+        u[OF.style] = style.index;
+        u[OF.shape] = SHAPE_INDEX[style.shape];
+        f[OF.dpr] = this.dpr;
+        for (const name of COPIED_PARAMS) f[OF[name]] = org[name];
+
+        const sent = this.organicSent;
+        for (let i = 0; i < u.length; i++) {
+            if (u[i] !== sent[i]) {
+                sent.set(u);
+                this.device.queue.writeBuffer(this.organicBuffer, 0, f);
+                return;
+            }
+        }
+    }
+
+    /** ブラーのパスごとのタップ表。σ は field の px で持っていて、そのパスの解像度のテクセルに換算する。変わったパスだけ書き直す。 */
+    writeBlurUniforms(plan, layout) {
+        const d = this.blurData;
+        for (const b of plan.blurs) {
+            const sigmaPx = b.branch === 'small' ? layout.sigmaSmall : layout.sigmaLarge;
+            const sigmaTexels = sigmaPx * (b.axis === 0 ? b.w / plan.fw : b.h / plan.fh);
+            if (sigmaTexels === b.sigmaTexels) continue;
+            b.sigmaTexels = sigmaTexels;
+            if (b.axis === 0) {
+                d[0] = 1 / b.w; d[1] = 0;
+            } else {
+                d[0] = 0; d[1] = 1 / b.h;
+            }
+            this.blurU32[2] = writeGaussianTaps(d, 4, sigmaTexels);
+            this.device.queue.writeBuffer(b.buffer, 0, d);
+        }
     }
 
     drawParticles(pass, pipeline, group, count) {

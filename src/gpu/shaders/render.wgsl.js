@@ -40,6 +40,15 @@ fn pxToNdc(px: vec2f) -> vec2f {
 }
 `;
 
+// 全画面三角形 (fade / blit / organic の全画面パス共通)。頂点バッファなし: (0,0) (2,0) (0,2)
+export const FULLSCREEN_VS = /* wgsl */`
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+  let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u));
+  return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}
+`;
+
 export const particleWGSL = RENDER_COMMON + /* wgsl */`
 @group(0) @binding(1) var<uniform> palette: array<vec4f, ${MAX_PALETTE}>;
 @group(0) @binding(2) var<storage, read> posVel: array<vec4f>;
@@ -74,13 +83,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 `;
 
 // トレイル: 永続テクスチャを BG 色で薄くフェードさせる (全画面三角形、アルファブレンド)
-export const fadeWGSL = RENDER_COMMON + /* wgsl */`
-@vertex
-fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
-  let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u));     // (0,0) (2,0) (0,2)
-  return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
-}
-
+export const fadeWGSL = RENDER_COMMON + FULLSCREEN_VS + /* wgsl */`
 @fragment
 fn fs() -> @location(0) vec4f {
   return vec4f(BG, R.fade);
@@ -88,14 +91,8 @@ fn fs() -> @location(0) vec4f {
 `;
 
 // トレイルテクスチャ -> canvas (同サイズなので textureLoad で等倍コピー)
-export const blitWGSL = /* wgsl */`
+export const blitWGSL = FULLSCREEN_VS + /* wgsl */`
 @group(0) @binding(0) var src: texture_2d<f32>;
-
-@vertex
-fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
-  let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u));
-  return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
-}
 
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
