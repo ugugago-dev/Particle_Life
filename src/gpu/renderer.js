@@ -24,7 +24,7 @@ const MAX_BLUR_LEVEL = 6;
 
 const OF = Object.fromEntries(ORGANIC_FIELDS.map((name, i) => [name, i]));
 // config.js から同名でコピーする項目 (残りは writeOrganicUniform で計算)
-const COPIED_PARAMS = ['fieldGain', 'glowIntensity', 'bandFreq', 'threshold', 'nucleusThreshold', 'speciesTint', 'bandBase', 'rimStrength', 'coreThreshold'];
+const COPIED_PARAMS = ['fieldGain', 'threshold', 'nucleusThreshold', 'speciesTint', 'rimStrength', 'coreThreshold', 'scopeStain', 'scopeVignette', 'scopeSpeck'];
 
 const ALPHA_BLEND = {
     color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
@@ -186,6 +186,13 @@ export class GpuRenderer {
                     fragment: { module: shape, entryPoint: 'fsGranule', targets: [{ format: FIELD_FORMAT }, { format: GRANULE_FORMAT }] },
                     primitive: { topology: 'triangle-list' },
                 }),
+                shapeSoft: device.createRenderPipeline({
+                    label: 'organic shape + soft large',
+                    layout: 'auto',
+                    vertex: { module: shape, entryPoint: 'vs' },
+                    fragment: { module: shape, entryPoint: 'fsSoft', targets: [{ format: FIELD_FORMAT }, { format: FIELD_FORMAT }] },
+                    primitive: { topology: 'triangle-list' },
+                }),
                 downsample: fullscreenPipeline('organic downsample', downsample, FIELD_FORMAT),
                 blur: fullscreenPipeline('organic blur', blur, FIELD_FORMAT),
                 composite: fullscreenPipeline('organic composite', composite, format),
@@ -258,7 +265,7 @@ export class GpuRenderer {
         const { canvas, dpr } = this;
         const paperStale = style.paper && (p?.paperW !== canvas.width || p?.paperH !== canvas.height || p?.paperDpr !== dpr);
         if (!p || p.fw !== L.fw || p.fh !== L.fh || p.margin !== L.margin || p.ks !== L.ks || p.kl !== L.kl || p.granules !== style.granules
-            || p.paper !== style.paper || paperStale) {
+            || p.softLarge !== !!style.softLarge || p.paper !== style.paper || paperStale) {
             this.destroyOrganicPlan();
             this.organicPlan = this.buildOrganicPlan(L, style);
         }
@@ -272,7 +279,7 @@ export class GpuRenderer {
         this.organicPlan = null;
     }
 
-    buildOrganicPlan({ fw, fh, margin, ks, kl }, { granules, paper }) {
+    buildOrganicPlan({ fw, fh, margin, ks, kl }, { granules, paper, softLarge }) {
         const { device, pipelines, canvas } = this;
         const textures = [];
         const make = (label, w, h, format = FIELD_FORMAT) => {
@@ -288,11 +295,15 @@ export class GpuRenderer {
 
         // field は余白付き、levels[0] (shape の出力) 以降は余白なし。levels[k] = 1/2^k
         const field = make('field', fw + 2 * margin, fh + 2 * margin);
+        const halve = (name, chain, k) => {
+            const prev = chain[k - 1];
+            chain.push(make(`${name} ${k}`, Math.max(1, Math.ceil(prev.w / 2)), Math.max(1, Math.ceil(prev.h / 2))));
+        };
         const levels = [make('shaped', fw, fh)];
-        for (let k = 1; k <= Math.max(ks, kl); k++) {
-            const prev = levels[k - 1];
-            levels.push(make(`level ${k}`, Math.max(1, Math.ceil(prev.w / 2)), Math.max(1, Math.ceil(prev.h / 2))));
-        }
+        for (let k = 1; k <= (softLarge ? ks : Math.max(ks, kl)); k++) halve('level', levels, k);
+        // softLarge: large ぼかしは別の整形の縮小列から作る
+        const levelsL = softLarge ? [make('shaped large', fw, fh)] : levels;
+        if (softLarge) for (let k = 1; k <= kl; k++) halve('large level', levelsL, k);
         const granuleRaw = granules ? make('granule (padded)', fw + 2 * margin, fh + 2 * margin, GRANULE_FORMAT) : null;
         const granule = granules ? make('granule', fw, fh, GRANULE_FORMAT) : null;
         const paperTex = paper ? make('paper', canvas.width, canvas.height, PAPER_FORMAT) : null;
@@ -301,12 +312,12 @@ export class GpuRenderer {
             entries: [{ binding: 0, resource: { buffer: this.organicBuffer } }],
         }) : null;
 
-        const shapePipeline = granules ? pipelines.shapeGranule : pipelines.shape;
+        const shapePipeline = granules ? pipelines.shapeGranule : softLarge ? pipelines.shapeSoft : pipelines.shape;
         const passes = [{    // 実行順の全画面パス
             label: 'organic shape',
             pipeline: shapePipeline,
             target: levels[0].view,
-            extraTarget: granule?.view,
+            extraTarget: granule?.view ?? (softLarge ? levelsL[0].view : undefined),
             group: device.createBindGroup({
                 layout: shapePipeline.getBindGroupLayout(0),
                 entries: [
@@ -316,20 +327,21 @@ export class GpuRenderer {
                 ],
             }),
         }];
-        for (let k = 1; k < levels.length; k++) {
-            passes.push({
-                label: `organic downsample ${k}`,
-                pipeline: pipelines.downsample,
-                target: levels[k].view,
-                group: device.createBindGroup({
-                    layout: pipelines.downsample.getBindGroupLayout(0),
-                    entries: [{ binding: 0, resource: levels[k - 1].view }],
-                }),
-            });
+        for (const chain of softLarge ? [levels, levelsL] : [levels]) {
+            for (let k = 1; k < chain.length; k++) {
+                passes.push({
+                    label: `organic downsample ${k}`,
+                    pipeline: pipelines.downsample,
+                    target: chain[k].view,
+                    group: device.createBindGroup({
+                        layout: pipelines.downsample.getBindGroupLayout(0),
+                        entries: [{ binding: 0, resource: chain[k - 1].view }],
+                    }),
+                });
+            }
         }
         const blurs = [];    // タップ表の更新用 (passes の部分集合)
-        const blurPair = (branch, k) => {
-            const lv = levels[k];
+        const blurPair = (branch, lv) => {
             const tmp = make(`${branch} blur tmp`, lv.w, lv.h);
             const out = make(`${branch} blur`, lv.w, lv.h);
             const add = (name, axis, src, dst) => {
@@ -354,8 +366,8 @@ export class GpuRenderer {
             add(`${branch}V`, 1, tmp, out);
             return out;
         };
-        const small = blurPair('small', ks);
-        const large = kl >= 0 ? blurPair('large', kl) : small;    // 使わないスタイルでは読まれない
+        const small = blurPair('small', levels[ks]);
+        const large = kl >= 0 ? blurPair('large', levelsL[kl]) : small;    // 使わないスタイルでは読まれない
 
         const compositeGroup = device.createBindGroup({
             layout: pipelines.composite.getBindGroupLayout(0),
@@ -371,7 +383,7 @@ export class GpuRenderer {
         });
 
         return {
-            fw, fh, margin, ks, kl, granules, textures, passes, blurs, compositeGroup,
+            fw, fh, margin, ks, kl, granules, softLarge: !!softLarge, textures, passes, blurs, compositeGroup,
             fieldView: field.view, granuleView: granuleRaw?.view ?? null,
             paper, paperW: canvas.width, paperH: canvas.height, paperDpr: this.dpr,
             paperView: paperTex?.view ?? null, paperGroup, paperDirty: paper,
@@ -545,7 +557,7 @@ export class GpuRenderer {
     drawOrganic(encoder, sim, view, canvasView, { dots, pointerOn, timer }) {
         const { pipelines } = this;
         const org = view.organic;
-        const style = ORGANIC_STYLES[org.organicStyle];
+        const style = ORGANIC_STYLES[org.organicStyle] ?? ORGANIC_STYLES.glass;    // 廃止したスタイル名は glass
         const count = sim.count;
         const layout = this.updateOrganicLayout(org, style, view.rMax, sim.world.height);
         const plan = this.ensureOrganicPlan(layout, style);
@@ -617,6 +629,7 @@ export class GpuRenderer {
         f[OF.fieldH] = layout.fh;
         f[OF.margin] = layout.margin;
         for (const name of COPIED_PARAMS) f[OF[name]] = org[name];
+        f[OF.threshold] *= style.thresholdScale ?? 1;
 
         const sent = this.organicSent;
         for (let i = 0; i < u.length; i++) {

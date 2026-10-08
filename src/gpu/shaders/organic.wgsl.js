@@ -6,8 +6,8 @@ import { ORGANIC_STYLES, SHAPE_INDEX } from '../../organicStyles.js';
 
 // OrganicParams の並び (WGSL の struct との一致は assertOrganicLayout が確認)。style / shape だけ u32
 export const ORGANIC_FIELDS = [
-    'weightNorm', 'splatRadius', 'fieldGain', 'style', 'shape', 'glowIntensity', 'bandFreq', 'threshold',
-    'nucleusThreshold', 'speciesTint', 'dpr', 'bandBase', 'rimStrength', 'coreThreshold',
+    'weightNorm', 'splatRadius', 'fieldGain', 'style', 'shape', 'threshold', 'nucleusThreshold', 'speciesTint',
+    'dpr', 'rimStrength', 'coreThreshold', 'scopeStain', 'scopeVignette', 'scopeSpeck',
     'fieldW', 'fieldH', 'margin',
 ];
 export const ORGANIC_UNIFORM_FLOATS = ORGANIC_FIELDS.length;
@@ -28,15 +28,15 @@ struct OrganicParams {
   fieldGain: f32,
   style: u32,
   shape: u32,
-  glowIntensity: f32,
-  bandFreq: f32,
   threshold: f32,
   nucleusThreshold: f32,
   speciesTint: f32,
   dpr: f32,
-  bandBase: f32,
   rimStrength: f32,
   coreThreshold: f32,
+  scopeStain: f32,
+  scopeVignette: f32,
+  scopeSpeck: f32,
   fieldW: f32,            // 余白を除いた field の px
   fieldH: f32,
   margin: f32,            // field の余白 (px)
@@ -143,7 +143,7 @@ fn fsGranule(in: VSOut) -> GranuleOut {
 }
 `;
 
-// field (平均密度 = 1) をぼかす前に 0..1 の指標 c に整形する: occupancy = 構造の占有度、compress = 圧縮した密度、nucleus = 核の指標
+// field (平均密度 = 1) をぼかす前に 0..1 の指標 c に整形する: occupancy = 構造の占有度、nucleus = 核の指標
 export const shapeWGSL = ORGANIC_SHARED + FULLSCREEN_VS + /* wgsl */`
 @group(0) @binding(0) var<uniform> O: OrganicParams;
 @group(0) @binding(1) var src: texture_2d<f32>;          // 余白付き
@@ -168,11 +168,9 @@ fn folded(t: texture_2d<f32>, x: vec2i) -> vec4f {
 }
 
 const OCC_SHARP = 2.0;
-// 1 - exp(-(v / s)^p)。bands の s, p は実測した密度で、ガスの塊 (v ≦ ~3.5) が c ≦ 0.2 に収まる値
+// 1 - exp(-(v / s)^p)。s, p は実測した密度で、ガスの塊 (v ≦ ~3.5) が c ≦ 0.2 に収まる値
 const NUCLEUS_S = 3.5;
 const NUCLEUS_P = 1.8;
-const BANDS_S = 6.0;
-const BANDS_P = 2.5;
 
 fn compress(v: f32, s: f32, p: f32) -> f32 {
   return 1.0 - exp(-pow(v / s, p));
@@ -182,7 +180,6 @@ fn shapeField(f: vec4f) -> vec4f {
   let v = f.a * O.fieldGain;
   var c: f32;
   switch (O.shape) {
-    case SHAPE_COMPRESS: { c = compress(v, BANDS_S, BANDS_P); }
     case SHAPE_NUCLEUS: { c = smoothstep(O.coreThreshold - 0.1, O.coreThreshold + 0.1, compress(v, NUCLEUS_S, NUCLEUS_P)); }
     case SHAPE_OCCUPANCY, default: { c = 1.0 - exp(-OCC_SHARP * max(v - O.threshold, 0.0)); }
   }
@@ -192,6 +189,29 @@ fn shapeField(f: vec4f) -> vec4f {
 @fragment
 fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
   return shapeField(folded(src, vec2i(frag.xy)));
+}
+
+// softLarge の large ぼかし用: threshold に依存しない。疎なガスは 0 付近、密な所は 1 に飽和 (s = 5 は旧しきい値 3 相当の体より少し大きい)
+const SOFT_S = 5.0;
+const SOFT_P = 2.0;
+
+fn softField(f: vec4f) -> vec4f {
+  let c = 1.0 - exp(-pow(f.a * O.fieldGain / SOFT_S, SOFT_P));
+  return vec4f(meanColor(f) * c, c);
+}
+
+struct ShapeSoftOut {
+  @location(0) shaped: vec4f,
+  @location(1) soft: vec4f,
+};
+
+@fragment
+fn fsSoft(@builtin(position) frag: vec4f) -> ShapeSoftOut {
+  let f = folded(src, vec2i(frag.xy));
+  var out: ShapeSoftOut;
+  out.shaped = shapeField(f);
+  out.soft = softField(f);
+  return out;
 }
 
 struct ShapeGranuleOut {
@@ -249,7 +269,7 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
 }
 `;
 
-// cell の画面固定のノイズ: r = 紙の目、g = 体の縁の揺らぎ、b = 核の縁の揺らぎ
+// cell / scope の画面固定のノイズ: r = 紙の目、g = 体の縁の揺らぎ、b = 核の縁の揺らぎ
 export const paperWGSL = ORGANIC_SHARED + FULLSCREEN_VS + /* wgsl */`
 @group(0) @binding(0) var<uniform> O: OrganicParams;
 
@@ -285,7 +305,7 @@ export const compositeWGSL = ORGANIC_COMMON + FULLSCREEN_VS + /* wgsl */`
 @group(0) @binding(3) var smallBlur: texture_2d<f32>;     // disk (rgb = 色 x c, a = c)
 @group(0) @binding(4) var largeBlur: texture_2d<f32>;     // ring
 @group(0) @binding(5) var granuleTex: texture_2d<f32>;    // cell だけ
-@group(0) @binding(6) var paperTex: texture_2d<f32>;      // cell だけ
+@group(0) @binding(6) var paperTex: texture_2d<f32>;      // cell / scope だけ
 
 fn luma(c: vec3f) -> f32 {
   return dot(c, vec3f(0.299, 0.587, 0.114));
@@ -295,10 +315,6 @@ fn luma(c: vec3f) -> f32 {
 fn tinted(base: vec3f, c: vec3f, amount: f32) -> vec3f {
   let k = luma(base) / max(luma(c), 0.05);
   return mix(base, clamp(c * k, vec3f(0.0), vec3f(1.0)), amount);
-}
-
-fn tintedHalf(base: vec3f, c: vec3f) -> vec3f {
-  return tinted(base, c, O.speciesTint * 0.5);
 }
 
 // 以下 s / l = shape の指標の small / large ぼかし (a = 指標、rgb / a = 平均色)。各スタイルの見た目は仕様書
@@ -352,36 +368,6 @@ fn cellStyle(s: vec4f, l: vec4f, g: f32, noise: vec3f) -> vec3f {
   return mix(mix(halo, col, body), nCol, nuc);
 }
 
-// glow: st3 の輪郭発光 (一様な内部では打ち消し合い、縁と穴の縁だけ光る)
-fn glowStyle(s: vec4f, l: vec4f) -> vec3f {
-  let m = s.a;
-  let n = l.a;
-  var col = vec3f(0.2) * m + vec3f(0.0, 0.2, 0.2) * n;  // st3 の CellColor / RingColor
-  let a = 1.0 - n;
-  let b = 1.0 - m;
-  col += tinted(vec3f(0.6, 0.85, 1.0), meanColor(s), O.speciesTint) * (max(a * a - b * b, 0.0) * 4.0 * O.glowIntensity);
-  return col;
-}
-
-// bands: st1 の sin(vec3(1,2,3) * freq * r^3)、r = bandBase + BAND_SPAN * 圧縮した密度
-const BAND_SPAN = 0.8;
-const BAND_EMBOSS = 0.35;
-const BAND_EMBOSS_SLOPE = 6.0;
-fn bandsStyle(s: vec4f, uv: vec2f) -> vec3f {
-  let r = O.bandBase + BAND_SPAN * s.a;
-  var col = max(sin(vec3f(1.0, 2.0, 3.0) * O.bandFreq * r * r * r), vec3f(0.0));
-  col = tintedHalf(col, meanColor(s));
-
-  // 密度を高さとみなしたエンボス
-  let e = 1.0 / vec2f(textureDimensions(smallBlur));
-  let hx = textureSampleLevel(smallBlur, samp, uv + vec2f(e.x, 0.0), 0.0).a - textureSampleLevel(smallBlur, samp, uv - vec2f(e.x, 0.0), 0.0).a;
-  let hy = textureSampleLevel(smallBlur, samp, uv + vec2f(0.0, e.y), 0.0).a - textureSampleLevel(smallBlur, samp, uv - vec2f(0.0, e.y), 0.0).a;
-  let nrm = normalize(vec3f(-vec2f(hx, hy) * BAND_EMBOSS_SLOPE, 1.0));
-  let light = normalize(vec3f(-0.5, -0.6, 0.65));
-  let shade = 1.0 + BAND_EMBOSS * (dot(nrm, light) - light.z);
-  return col * shade;
-}
-
 // glass: 核 = m の 0.5 の等高線の内側、体 = n の GLASS_EDGE の等高線の内側。輪郭は fwidth で約 1px の AA
 const GLASS_EDGE = 0.2;
 
@@ -416,9 +402,116 @@ fn glassStyle(s: vec4f, l: vec4f, uv: vec2f) -> vec3f {
   return col;
 }
 
-// mono: st2 の場のグレースケール
-fn monoStyle(s: vec4f, l: vec4f) -> vec3f {
-  return tintedHalf(vec3f(1.0), meanColor(s)) * smoothstep(0.0, 1.0, mix(s.a, l.a, 0.35));
+// scope: 明視野の顕微鏡像 (体 = large の等高線の壁、小器官 = small の占有度を Beer-Lambert で染める)
+const SCOPE_BG = vec3f(0.93, 0.94, 0.88);
+const SCOPE_EDGE = 0.2;                    // 体の輪郭 (n)
+const SCOPE_GATE = 0.2;                    // scopeSpeck = 1 で小器官に要る n
+const SCOPE_BODY = 0.35;                   // 小器官の輪郭 (m)
+const SCOPE_CYTO = 0.1;                    // 細胞質の吸光度 / scopeStain
+const SCOPE_STAIN_REF = 1.5;               // この scopeStain で密度 1 の染色が stainColor になる
+const SCOPE_LIGHT = vec2f(-0.6, -0.8);     // 光源の向き (左上、画面座標)
+const SCOPE_SLOPE = 3.0;
+const SCOPE_RELIEF = 0.18;
+const SCOPE_SPEC = 0.15;
+const STAIN_DL = 0.15;                     // 染色は種類の色より L を下げる
+const STAIN_CHROMA = 1.2;
+const STAIN_CMAX = 0.19;
+
+fn srgbToLinear(c: vec3f) -> vec3f {
+  return select(c / 12.92, pow((c + 0.055) / 1.055, vec3f(2.4)), c > vec3f(0.04045));
+}
+
+fn linearToSrgb(c: vec3f) -> vec3f {
+  return select(c * 12.92, 1.055 * pow(c, vec3f(1.0 / 2.4)) - 0.055, c > vec3f(0.0031308));
+}
+
+fn toOklab(c: vec3f) -> vec3f {
+  let lms = pow(max(vec3f(
+    dot(vec3f(0.4122214708, 0.5363325363, 0.0514459929), c),
+    dot(vec3f(0.2119034982, 0.6806995451, 0.1073969566), c),
+    dot(vec3f(0.0883024619, 0.2817188376, 0.6299787005), c)), vec3f(0.0)), vec3f(1.0 / 3.0));
+  return vec3f(
+    dot(vec3f(0.2104542553, 0.7936177850, -0.0040720468), lms),
+    dot(vec3f(1.9779984951, -2.4285922050, 0.4505937099), lms),
+    dot(vec3f(0.0259040371, 0.7827717662, -0.8086757660), lms));
+}
+
+fn fromOklab(lab: vec3f) -> vec3f {
+  let lms = vec3f(
+    lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z,
+    lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z,
+    lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z);
+  let c = lms * lms * lms;
+  return vec3f(
+    dot(vec3f(4.0767416621, -3.3077115913, 0.2309699292), c),
+    dot(vec3f(-1.2684380046, 2.6097574011, -0.3413193965), c),
+    dot(vec3f(-0.0041960863, -0.7034186147, 1.7076147010), c));
+}
+
+// 種類の色 -> 密度 1 の染色の色: OKLCH の色相を保って彩度を上げ L を下げる (黄は下げ幅小)。範囲外は同じ L の灰色へ寄せる
+fn stainColor(c: vec3f) -> vec3f {
+  let lab = toOklab(srgbToLinear(c));
+  let chroma = length(lab.yz);
+  let t = smoothstep(0.74, 0.9, lab.x);
+  let L = max(lab.x - STAIN_DL * (1.0 - 0.75 * t), 0.0);
+  let ab = lab.yz * select(0.0, min(chroma * STAIN_CHROMA, STAIN_CMAX) / chroma, chroma > 1e-4);
+  let rgb = fromOklab(vec3f(L, ab));
+  let gray = vec3f(L * L * L);
+  let over = select(vec3f(1e3), (vec3f(1.0) - gray) / (rgb - gray), rgb > vec3f(1.0));
+  let under = select(vec3f(1e3), gray / (gray - rgb), rgb < vec3f(0.0));
+  let k = min(1.0, min(min(min(over.x, over.y), over.z), min(min(under.x, under.y), under.z)));
+  return clamp(linearToSrgb(clamp(gray + (rgb - gray) * k, vec3f(0.0), vec3f(1.0))), vec3f(0.03), vec3f(1.0));
+}
+
+// 累乗でなく背景 * (色 / 背景)^密度で濃くする (色相がずれにくい)
+fn stainTransmit(c: vec3f) -> vec3f {
+  return min(stainColor(c) / SCOPE_BG, vec3f(1.0));
+}
+
+fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
+  let m = s.a;
+  let n = l.a + (noise.g - 0.5) * 0.08;
+  let k = O.scopeStain / SCOPE_STAIN_REF;
+  let w = O.dpr;
+  let line = vec3f(1.0, 1.0, 0.96);
+
+  var col = SCOPE_BG * (1.0 + 0.05 * (noise.g - 0.5));
+
+  let dist = (n - SCOPE_EDGE) / max(fwidth(n), 1e-4);          // 体の輪郭からの px (内側が正)
+  col *= mix(vec3f(1.0), pow(stainTransmit(meanColor(l)), vec3f(SCOPE_CYTO * O.scopeStain)), saturate(dist + 0.5));
+  let fade = smoothstep(0.002, 0.005, fwidth(n));              // 勾配が弱い所 (平らな頂上・くびれ) では壁を出さない
+  col = mix(col, line, 0.7 * saturate(0.6 * w + 0.5 - abs(dist + 1.6 * w)) * fade);
+  col = mix(col, vec3f(0.32, 0.33, 0.33), 0.65 * saturate(0.7 * w + 0.5 - abs(dist)) * fade);
+
+  let T = stainTransmit(meanColor(s));
+  let d = (m - SCOPE_BODY) / max(fwidth(m), 1e-4);             // 小器官の輪郭からの px
+  let gate = select(aaStep(n, SCOPE_GATE * O.scopeSpeck), 1.0, O.scopeSpeck <= 0.0);    // 体の外の小さな塊は描かない
+  let cover = saturate(d + 0.5) * gate;
+  col = mix(col, line, 0.4 * saturate(0.5 * w + 0.5 - abs(d + 1.5 * w)) * gate);
+
+  let e = 1.0 / vec2f(textureDimensions(smallBlur));
+  let g = vec2f(
+    textureSampleLevel(smallBlur, samp, uv + vec2f(e.x, 0.0), 0.0).a - textureSampleLevel(smallBlur, samp, uv - vec2f(e.x, 0.0), 0.0).a,
+    textureSampleLevel(smallBlur, samp, uv + vec2f(0.0, e.y), 0.0).a - textureSampleLevel(smallBlur, samp, uv - vec2f(0.0, e.y), 0.0).a);
+  let tilt = -dot(g, SCOPE_LIGHT) * SCOPE_SLOPE;               // 光に面した縁が正
+  let nrm = normalize(vec3f(-g * SCOPE_SLOPE, 1.0));
+  let spec = pow(saturate(dot(nrm, normalize(vec3f(SCOPE_LIGHT * 0.5, 1.0)))), 48.0);
+
+  let thick = mix(0.7, 1.0, smoothstep(0.15, 0.85, l.a));      // 大きな塊ほど厚い
+  var body = col * pow(T, vec3f(k * m * thick * (1.0 + 1.2 * (noise.r - 0.5) + 1.0 * (noise.b - 0.5))));
+  body *= 1.0 + SCOPE_RELIEF * clamp(tilt, -1.0, 1.0);
+  body *= 1.0 - 0.2 * smoothstep(0.85, 1.0, l.a);              // 核小体
+  body += SCOPE_SPEC * spec;
+  let ring = cover * (1.0 - saturate(d - 1.3 * w + 0.5));
+  let outline = col * pow(T, vec3f(k * 2.2)) * 0.6;
+  col = mix(col, body, cover);
+  col = mix(col, outline, ring);
+
+  col *= 1.0 + 0.16 * (noise.r - 0.5);
+
+  let r = length((uv - 0.5) * R.canvasSize) / length(0.5 * R.canvasSize);    // 角で 1 の円 (アスペクトを保つ)
+  col *= 1.0 - 0.55 * O.scopeVignette * smoothstep(0.4, 1.0, r);
+  return col;
 }
 
 fn sampleLarge(uv: vec2f) -> vec4f {
@@ -436,10 +529,8 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
       let g = textureSampleLevel(granuleTex, samp, uv, 0.0).r;
       col = cellStyle(s, sampleLarge(uv), g, textureLoad(paperTex, vec2i(frag.xy), 0).rgb);
     }
-    case STYLE_GLOW: { col = glowStyle(s, sampleLarge(uv)); }
-    case STYLE_BANDS: { col = bandsStyle(s, uv); }
-    case STYLE_GLASS: { col = glassStyle(s, sampleLarge(uv), uv); }
-    case STYLE_MONO, default: { col = monoStyle(s, sampleLarge(uv)); }
+    case STYLE_SCOPE: { col = scopeStyle(s, sampleLarge(uv), uv, textureLoad(paperTex, vec2i(frag.xy), 0).rgb); }
+    case STYLE_GLASS, default: { col = glassStyle(s, sampleLarge(uv), uv); }
   }
   return vec4f(clamp(col, vec3f(0.0), vec3f(1.0)), 1.0);
 }

@@ -26,7 +26,7 @@ export function createGUI(params, actions, { advanced = false, preset = CUSTOM }
     const styleControls = {}; // advanced only
 
     function showStyleControls() {
-        const used = ORGANIC_STYLES[params.organicStyle].params;
+        const used = (ORGANIC_STYLES[params.organicStyle] ?? ORGANIC_STYLES.glass).params;
         for (const [name, controller] of Object.entries(styleControls)) controller.show(used.includes(name));
     }
 
@@ -86,9 +86,9 @@ export function createGUI(params, actions, { advanced = false, preset = CUSTOM }
             nucleusThreshold: organic.add(params, 'nucleusThreshold', 0.3, 0.99, 0.01),
             coreThreshold: organic.add(params, 'coreThreshold', 0.3, 0.99, 0.01),
             rimStrength: organic.add(params, 'rimStrength', 0, 2, 0.05),
-            glowIntensity: organic.add(params, 'glowIntensity', 0, 3, 0.01),
-            bandFreq: organic.add(params, 'bandFreq', 1, 100, 0.5),
-            bandBase: organic.add(params, 'bandBase', 0.05, 0.6, 0.005),
+            scopeStain: organic.add(params, 'scopeStain', 0, 4, 0.05),
+            scopeVignette: organic.add(params, 'scopeVignette', 0, 1, 0.01),
+            scopeSpeck: organic.add(params, 'scopeSpeck', 0, 1, 0.01),
         });
         showStyleControls();
         organic.add(params, 'showParticles');

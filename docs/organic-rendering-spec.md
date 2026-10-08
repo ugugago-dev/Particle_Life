@@ -3,22 +3,20 @@
 粒子を「点の集まり」ではなく「細胞・SmoothLife の構造」のように見せる描画 (`renderMode: 'organic'`)。
 シミュレーション側は変更しない (描画は位置・種類の読み取りだけ)。`renderMode: 'dots'` は従来どおりの点描画で、変更なし。
 
-参考にしたもの (すべて `docs/` 内):
+参考にしたもの:
 
-- `st1.txt` (Shadertoy, 流体 + スライム) の Image パス (非ヘイトマップ側): `sin(vec3(1,2,3) * freq * r^3)`
-- `st2.txt` (SmoothLife) の Image パス: 場そのもののグレースケール
-- `st3.txt` (SmoothLife L) の Image パス: disk 平均 m と ring 平均 n による輪郭発光
-- 水彩の生物細胞イラスト (青 -> ミント -> 淡黄の体、紫の核、顆粒)
+- 水彩の生物細胞イラスト (青 -> ミント -> 淡黄の体、紫の核、顆粒) = cell
+- 明視野の光学顕微鏡の写真 (オオカナダモの葉の細胞 = 淡い背景に半透明の細胞室と暗い縁の丸い葉緑体、TEM = 縁のくっきりした暗い丸い顆粒と細かい粒状) = scope
 
 ## パイプライン (organic のとき、トレイルは無視して不透明な全画面を描く)
 
 | # | パス | 入力 -> 出力 | 内容 |
 |---|---|---|---|
-| 0 | paper (cell だけ) | -> `paper` (rgba8unorm, canvas 解像度) | 画面固定のノイズ (紙の目・体の縁の揺らぎ・核の縁の揺らぎ) を焼く。canvas のサイズ / dpr が変わったとき (plan を作り直したとき) だけ |
+| 0 | paper (cell / scope だけ) | -> `paper` (rgba8unorm, canvas 解像度) | 画面固定のノイズ (紙の目・体の縁の揺らぎ・核の縁の揺らぎ。scope では粒状ノイズ・縁の揺らぎ・染色のむら) を焼く。canvas のサイズ / dpr が変わったとき (plan を作り直したとき) だけ |
 | 1 | splat | 粒子 -> `field` (rgba16float、周囲に余白) (+ cell だけ `granule` (r16float、余白付き)) | 粒子ごとの四角形 (4 頂点の triangle-strip、instance = 粒子) を加算。`field` = (色 x w, w)。カーネルは等方の `(1 - d^2)^3`。周期境界のコピーは描かず、端をまたぐ分は余白 (スプラット半径 + 1 px) に落とす。cell は MRT のパイプライン (`fsGranule`)、ほかは field だけのパイプライン (`fs`) |
-| 2 | shape | `field` -> `shaped` (L0) (+ cell だけ顆粒 -> 余白なしの `granule`) | 余白に落ちた端のはみ出しを反対側の端へ折り返して足し (周期境界)、スタイルに合わせて場を整形 (後述)。出力は `(平均色 x c, c)`。cell は顆粒も同じパスで折り返す (MRT、`fsGranule`) |
-| 3 | downsample | L(k-1) -> L(k) | 2x2 の箱平均で 1/2 ずつ縮小。ブラーの σ が大きいときだけ (下記) |
-| 4 | blur x 4 (bands は x 2) | L(ks) -> small、L(kl) -> large | 分離ガウス (水平 -> 垂直) を small (disk) と large (ring) の 2 本。サンプラは repeat (周期境界)。large を使わないスタイル (bands) は large のブラーと、その分の縮小段を作らない |
+| 2 | shape | `field` -> `shaped` (L0) (+ cell だけ顆粒 -> 余白なしの `granule`) | 余白に落ちた端のはみ出しを反対側の端へ折り返して足し (周期境界)、スタイルに合わせて場を整形 (後述)。出力は `(平均色 x c, c)`。cell は顆粒も、`softLarge` のスタイル (scope) は large 用の柔らかい整形 `shaped large` も同じパスで書く (MRT、`fsGranule` / `fsSoft`) |
+| 3 | downsample | L(k-1) -> L(k) | 2x2 の箱平均で 1/2 ずつ縮小。ブラーの σ が大きいときだけ (下記)。`softLarge` は `shaped large` からも large 用の縮小列を作る |
+| 4 | blur x 4 | L(ks) -> small、L(kl) -> large (`softLarge` は `shaped large` の列から) | 分離ガウス (水平 -> 垂直) を small (disk) と large (ring) の 2 本。サンプラは repeat (周期境界)。表の `params` に `blurLarge` が無いスタイル (現在は無い) は large のブラーと、その分の縮小段を作らない |
 | 5 | composite | small + large + granule -> canvas | スタイルの着色。不透明。そのあとに粒子の重ね描き (`showParticles`) とポインタ円 |
 
 解像度:
@@ -48,14 +46,44 @@
 
 | スプラット (x rMax) | 使うスタイル | ガス 中央値 / 90% / 99% | 構造 1% / 10% / 中央値 | 二つを分ける最適なしきい値 (誤分類) |
 |---|---|---|---|---|
-| 0.5 | cell / glow / mono | 0.6〜0.9 / 1.1〜1.5 / 1.6〜2.0 | 1.6〜2.3 / 2.9〜4.3 / 6.7〜12.6 | 1.8〜2.1 (0.4〜1.7%) |
-| 0.3 | bands | 0.8〜1.4 / 1.5〜2.5 / 2.4〜3.6 | 1.6〜2.6 / 3.5〜5.1 / 8〜15 | 2.6〜3.3 (1.4〜5%) |
+| 0.5 | cell | 0.6〜0.9 / 1.1〜1.5 / 1.6〜2.0 | 1.6〜2.3 / 2.9〜4.3 / 6.7〜12.6 | 1.8〜2.1 (0.4〜1.7%) |
+| 0.3 | (旧 bands。測定のみ) | 0.8〜1.4 / 1.5〜2.5 / 2.4〜3.6 | 1.6〜2.6 / 3.5〜5.1 / 8〜15 | 2.6〜3.3 (1.4〜5%) |
 | 0.15 | glass | 1.7〜2.4 / 2.9〜4.3 / 4.5〜6.6 | 2.1〜3.3 / 4.5〜7.2 / 10〜19 | 4.1〜5.1 (2.4〜8.7%) |
 
+scope のスプラットは 0.2 (= 0.4 x 0.5)。粒 (ごみ) 対策のために、次の節で粒の塊ごとに測り直した。
+
 - 画面の面積の 50〜70% は field < 0.3 (粒子の無い所)。ガスは一様な薄い場ではなく、小さな塊が点々と並んだもの。
-  以前の `threshold 0.6` はガスの塊をほぼすべて通していた (glow / mono / cell が点だらけ、cell の核が肥大)。
+  以前の `threshold 0.6` はガスの塊をほぼすべて通していた (cell が点だらけ、核が肥大)。
 - この測定から: `threshold` 1.5 (ガスの粒子の ~90% を落とし、構造の縁の細い膜 (粒の鎖の弧) は一部残す。2.0 だと膜も消える)、
-  glass の `coreThreshold` 0.8 (圧縮後。field ~4.6 = 細かい場でのガスの 90〜99% 点)、bands の圧縮曲線 s = 6, p = 2.5、cell の `nucleusThreshold` 0.7。
+  glass の `coreThreshold` 0.8 (圧縮後。field ~4.6 = 細かい場でのガスの 90〜99% 点)、cell の `nucleusThreshold` 0.7。
+
+### scope: 粒の塊の密度 (ごみ対策の測定)
+
+乱数ルール 6 種 (seed 5、60,000 粒子、16:9、1250 ステップ) で、粒を距離 0.006 (= スプラット半径 0.2 rMax) でつないだ塊に分け、塊の大きさ別に field の値 v (scope のスプラット 0.2、`fieldGain` 1) と large ぼかし n を GPU から読み戻して測った。
+
+| 塊の粒数 | 塊の数 | v のピーク p10 / p50 / p90 / max |
+|---|---|---|
+| 1 | 2940 | 0.92 / 0.98 / 1.04 / 4.5 |
+| 2〜3 | 969 | 1.03 / 1.30 / 1.81 / 2.7 |
+| 4〜6 | 356 | 1.37 / 1.77 / 2.49 / 3.4 |
+| 7〜12 | 221 | 1.65 / 2.33 / 3.35 / 6.1 |
+| 13〜30 | 144 | 2.04 / 3.00 / 4.62 / 9.5 |
+| 31〜100 | 156 | 3.22 / 4.75 / 10.3 / 17.3 |
+| 101〜300 | 66 | 4.78 / 7.99 / 14.1 / 21.6 |
+| 301〜 | 24 | 7.78 / 26.7 / 40.2 / 42.4 |
+
+- 粒 1 個のピークは `weightNorm` そのもの (1 / (1.5 ρ_mean s^2) = 1.05)。しきい値 (実効 2 以上) より遥かに下で、単独の粒は描かれない。目に付く「点」は 7〜100 粒の小さな塊 (ピーク 2〜10)。
+- 大きな細胞 (101 粒〜) の粒の位置の v は p10 2.3 / p50 4.9 / p90 10.6。殻 (縁の弧・鎖) の粒は v 2〜5 で、小さな塊のピークと**同じ範囲**。v だけではごみと殻を分けられない (しきい値を上げると同じだけ両方が消える)。分けられるのは周りの質量 (n)。
+- n (large ぼかし、旧 shape の実効しきい値 3.9) のピーク p50 / p90: 1〜30 粒の塊 0.00〜0.01 / 0.03〜0.06、31〜100 粒 0.02 / 0.41、101〜300 粒 0.17 / 0.36、301〜 0.58 / 0.87。ごみには周りの質量が無い (n ≈ 0)。
+
+しきい値が n (= 体の輪郭・殻) に伝わる経路 (コードで確認): `shapeField` の `c = 1 - exp(-2 * max(v - threshold, 0))` が `shaped` に入り、small も large も同じ `shaped` (L0) から縮小・ぼかしを作る。`threshold` を上げると v がしきい値の近くの画素 (殻・疎な縁) の `c` が下がり、large ぼかしの n が下がって `n = 0.2` の等高線が内側へ寄る。同じ状態で測ると、実効しきい値 1.5 / 3.0 / 3.9 / 4.8 / 6.0 で、大きな細胞の粒のうち壁の外に出る割合が 2.9 / 20 / 28 / 34 / 37%、`n > 0.2` の面積が 17070 / 6402 / 4602 / 3663 / 3068 テクセル。しきい値を上げるとごみと同時に殻が痩せる。
+
+試したこと (すべて同じ粒の状態で比較):
+
+- A (殻をしきい値から切り離す): large 用に別の整形 `1 - exp(-(v / s)^p)` (しきい値に依存しない) を作り、large ぼかしだけそちらから作る。`s` が小さい (2〜4) と疎なガスの筋が薄い「幽霊の細胞」(壁付き) になる。`s = 6, p = 2` で旧しきい値 3.9 の体と同じ大きさ、`s = 5` で少し大きい。殻は安定するが、A だけでは小器官 (small) のごみは減らない。
+- B (文脈で隠す): 小器官を `n` で隠す。small と large が同じ `shaped` のままだと、しきい値を下げて殻を戻すと n の輪郭も広がり、ガスの筋が壁付きの細胞になる (比較: A + B のほうが壁の数が少ない)。B だけでもごみは消えるが、殻の大きさがしきい値に連動したまま。
+- C (小器官の応答を非線形に): `c = 1 - exp(-0.43 (v / T)^p)` (v = T で 0.35、p = 2.5 / 4)。単独の粒 (v ≈ 1) はもともと見えず、7 粒以上の塊は線形のしきい値と同じ範囲に入るので、ごみは減らなかった (同じ T で見える塊の数が 39 / 50 / 127 -> 48 / 65 / 129)。採用しない。
+- 採用: A + B。small = 低めのしきい値 (実効 2.4: 殻の弧・小さな器官が戻る)、large = しきい値に依存しない整形 (`s = 5, p = 2`)、小器官は体の中だけ描く (`scopeSpeck`)。同じ状態の前後 (実効しきい値 3.9 の旧版 -> 新版): 体の面積 4875 -> 6086 テクセル (新版は threshold 1.6〜3.2 で完全に同じ)、壁の外の粒 28% -> 21%、100 粒以下の塊のうち小器官が描かれる数 73 -> 25。描画時間 (NVIDIA、HUD) 0.56 -> 0.58 ms。
 
 ## スタイル表 (`src/organicStyles.js`)
 
@@ -64,17 +92,20 @@
 | 項目 | 意味 |
 |---|---|
 | `index` | WGSL の `STYLE_<NAME>` (表から生成した定数。composite の `switch` の case) |
-| `fine` | スプラット半径 / small ぼかし / large ぼかしの倍率 (bands: 0.6 / 0.5、glass: 0.3 / 0.3 / 1、ほかは 1) |
-| `shape` | shape パスの種類 (`occupancy` / `compress` / `nucleus`)。WGSL の `SHAPE_<NAME>` |
+| `fine` | スプラット半径 / small ぼかし / large ぼかしの倍率 (glass: 0.3 / 0.3 / 1、scope: 0.4 / 0.4 / 1、cell は 1) |
+| `shape` | shape パスの種類 (`occupancy` / `nucleus`)。WGSL の `SHAPE_<NAME>` |
 | `granules` | 顆粒テクスチャを使う (cell だけ) |
+| `paper` | 画面固定のノイズのテクスチャを焼く (cell / scope) |
 | `params` | そのスタイルが読むスタイル固有の config 項目。GUI はこれに含まれる項目だけ表示する。`blurLarge` を含まないスタイルは large ぼかしを作らない |
+| `thresholdScale` | `threshold` に掛ける倍率 (省略 = 1)。scope だけ 1.6 (細かい場ほど粒ごとの密度が高く出るため) |
+| `softLarge` | large ぼかしを `shape` ではなく、`threshold` に依存しない柔らかい整形 (下記 soft) から作る (scope だけ)。`granules` とは併用しない |
 
 ## shape (ぼかす前の整形)
 
 `v = field.a * fieldGain` (平均密度 = 1) として、スタイルの `shape` ごとに:
 
-- occupancy (glow / mono / cell): `c = 1 - exp(-2 * max(v - threshold, 0))`。空き (ガス) は 0、構造の内部は ~1 の「占有度」。SmoothLife の場の値 (0 か 1 に近い) に当たる。これを small / large でぼかしたものが disk 平均 m、ring 平均 n。
-- compress (bands): `c = 1 - exp(-(v / 6)^2.5)`。密度を 0..1 に圧縮 (ガスの塊 (v ≦ ~3.5) は c ≦ 0.2 で空きの青のレリーフ、構造の縁で立ち上がり、芯 (v > ~10) で飽和)。以前の `(v / 3.5)^1.8` はガスの塊を黄〜赤の点にしていた。ぼかす前に飽和させるので、芯の粒子ノイズが縞に乗らない。st1 の質量 r に当たる。
+- occupancy (cell / scope): `c = 1 - exp(-2 * max(v - threshold, 0))` (scope の `threshold` は `thresholdScale` 倍)。空き (ガス) は 0、構造の内部は ~1 の「占有度」。SmoothLife の場の値 (0 か 1 に近い) に当たる。これを small / large でぼかしたものが disk 平均 m、ring 平均 n (scope の n は下の soft)。
+- soft (scope の large だけ。`softLarge`): `c = 1 - exp(-(v / 5)^2)`。`threshold` に依存しない。疎なガス (v ≦ 2) は c ≦ 0.15、密な所 (v ≧ 10) は 0.98 以上に飽和。出力は `shaped large` へ `(平均色 x c, c)`。
 - nucleus (glass): 圧縮 `c0 = 1 - exp(-(v / 3.5)^1.8)` のあと `c = smoothstep(coreThreshold - 0.1, coreThreshold + 0.1, c0)`。「核 (密度が高い所) の指標」で、ガスも疎な粒の殻も 0。体・核・膜はすべてこの指標のぼかしから作る。
 
 出力は `(field.rgb / field.a * c, c)`。ぼかし後の `rgb / a` が加重平均色 (種類の色)。
@@ -82,11 +113,6 @@
 ## スタイル (`organicStyle`)
 
 以下 `m` = small ぼかし後の `a`、`n` = large ぼかし後の `a`、`C` = `rgb / a` (種類の平均色)。`tinted(base, C, k)` は明るさを保って色相を C へ `k` だけ寄せる。
-
-### glow
-
-st3 の式そのまま: `glow = max((1-n)^2 - (1-m)^2, 0) * 4 * glowIntensity`、色 `vec3(.6,.85,1.)` (種類の色を `speciesTint` だけ混ぜる)、
-ベース `0.2 * m + vec3(0,.2,.2) * n`。密な構造の内側の縁と穴の縁が光り、一様な内部では打ち消し合う。
 
 ### glass (既定)
 
@@ -100,21 +126,26 @@ st3 の式そのまま: `glow = max((1-n)^2 - (1-m)^2, 0) * 4 * glowIntensity`�
 - 核: `m > 0.5` の内側を `Cs` で平らに塗る。細かい場 (スプラット 0.3 倍 x 0.5 = 0.15 rMax、small ぼかし 0.3 倍) の色なので、粒が作る縞 (緑 / 赤) や色の混ざりがそのまま残る。
   縁に、自分の色を暗く (x 0.62) 少し濃くした約 1px (`1.2 * dpr`) の縁取りを付けて、淡い体から分離する。`n < 0.2` の小さな粒は核としても出さない。
 - 画面固定のノイズ・スペキュラ・陰影・屈折・ビネット・外側の輪は使わない (動いても揺らがない)。
-- glass も bands と同様に細かい場 (スプラット 0.3 倍、small ぼかし 0.3 倍)。large ぼかしは縮めない (体の輪郭に使うため)。
+- glass は細かい場 (スプラット 0.3 倍、small ぼかし 0.3 倍)。large ぼかしは縮めない (体の輪郭に使うため)。
 
-### bands
+### scope
 
-`col = max(sin(vec3(1,2,3) * bandFreq * r^3), 0)`、`r = bandBase + 0.8 * c` (c = shape で圧縮した密度をぼかしたもの)。
+明視野の光学顕微鏡の像。淡い透過光の背景、細い壁で囲まれた半透明の細胞、染色された丸い小器官。**種類 (色) が一目で区別できること**が必須条件。
+`s` = small ぼかし (`m = s.a`、shape = occupancy。`threshold` が効く)、`l` = large ぼかし (`n = l.a`、softLarge の soft 整形。`threshold` に依存しない)、`Cs = s.rgb / s.a`、`Cl = l.rgb / l.a`。
 
-- 空き (c = 0) は `r = bandBase = 0.24` (st1 の `density_target`)。位相 `25 * 0.24^3 ≈ 0.35` なので `sin(0.35, 0.69, 1.04) ≈ (0.34, 0.64, 0.86)` = 明るい青。画面全体がこの青で、ガスの粒子ごとのわずかな密度差が水色〜淡い青のレリーフになる。
-- 密度が上がると位相が進み、黄 -> 赤 -> 紫 -> 緑 -> 青 -> 黒 の周期を何回も通る (位相 ≈ 2π の倍数付近が黒い輪)。構造の縁は虹色の輪、芯は飽和した位相 (既定では紫) になる。
-- bands だけ、スプラット半径を 0.6 倍、small ぼかしを 0.5 倍にして細かい場にする (st1 の密度のカーネルが ~2px と細かく、筋状のレリーフになるため)。large ぼかしは使わない。
-- 控えめなエンボス: small ぼかしの密度を高さとみなし、勾配から固定光源 (左上) の陰影 `1 + 0.35 * (dot(n, L) - L.z)` を色に掛ける。
-- `speciesTint` は半分の強さで種類の色相を混ぜる。
-
-### mono
-
-`smoothstep(0, 1, mix(m, n, 0.35))` のグレースケール (わずかに種類の色)。黒地に白い柔らかい構造、粒子の無い所は黒。
+- 背景: 淡い暖色の透過光 `(.93,.94,.88)`。paper の `g` で ±2.5% の照明むら、`r` の粒状ノイズ (全体に ±8%)。接眼レンズのビネット = 中心からの距離を対角線の半分で割った `r` (角で 1、アスペクトを保った円) で `1 - 0.55 * scopeVignette * smoothstep(0.4, 1, r)` を全体に掛ける (0.6 で角は 0.67 倍。最大でも 0.45 倍で、真っ黒にはならない)。
+- 体 (細胞質): `n` (soft 整形の large ぼかし。+ 低周波ノイズ ±0.04) の等高線 `n = 0.2` の内側に、`Cl` の染色の透過率を `0.1 * scopeStain` 乗した、ごく薄い色を掛ける。壁 = 輪郭に沿った暗い灰色の線 (半幅 `0.7 dpr`、不透明度 0.65) と、その外側 `1.6 dpr` の明るい線 (屈折のハロー、不透明度 0.7)。どちらも `fwidth` の px 距離で AA し、勾配が弱い所 (`fwidth(n)` が 0.002〜0.005 未満) では出さない (glass の膜と同じ)。
+- 小器官: `m = 0.35` の等高線の内側を Beer-Lambert の吸収で染める。`col = 下の色 * pow(T, k * m * 厚み * 粒)`。体の外の小さな塊は描かない (`scopeSpeck`): `n < 0.2 * scopeSpeck` の所は隠す (`aaStep`、輪郭は `fwidth` で 1 px の AA。半透明にすると薄いしみが残るので、0 か 1 の切り替え)。`scopeSpeck` = 1 で体の輪郭 (n = 0.2) の外は描かず、0.5 で輪郭のすぐ外 (n ≧ 0.1) まで、0 で隠さない。
+  - `T = stainColor(Cs) / 背景` (密度 1 の染色の色を背景で割った透過率)、`k = scopeStain / 1.5` (既定で密度 1 の所がちょうど `stainColor`)。薄い縁は淡く、濃い芯は深く、同じ色相で濃くなる。
+  - `厚み = mix(0.7, 1, smoothstep(0.15, 0.85, n))` (大きな塊ほど厚く、中心が濃い)。`粒 = 1 + 1.2 (r - 0.5) + (b - 0.5)` (paper の細かい粒と低周波のむらによる染色ムラ。画面固定なので粒子が動いても揺らがない)。
+  - 輪郭: 縁の内側 `1.3 dpr` に自分の色を暗くした線 (`下の色 * T^(2.2 k) * 0.6`)、外側 `1.5 dpr` に明るい線 (不透明度 0.4)。`fwidth(m)` による AA。
+  - 斜光のレリーフ (DIC 風): small の `a` の勾配 (±1 テクセルの中央差分) を高さとみなし、固定光源 (左上) の陰影 (振幅 ±0.18) と、光源側に寄せた半ベクトルでの小さなスペキュラ (`pow(.., 48) * 0.15`)。
+  - 核小体: `n >= 0.85` (大きな塊の芯) では最大 20% 暗くする。
+- `stainColor` (種類を見分ける色): パレットの色を OKLab にして、色相 (a, b の向き) を保ったまま彩度 x1.2 (上限 0.19)、L を 0.15 下げる (L > 0.74 の黄は下げ幅を最大 75% 減らす。暗い黄は黄に見えない)。sRGB の範囲外は、線形 RGB で同じ L の灰色へ寄せて収める (色相が保たれる)。
+  - 色の累乗ではなく `背景 * (色 / 背景)^密度` で濃淡をつける (色相がずれにくい)。単純に色を累乗すると橙が赤へ寄って赤と区別できなくなる (6 種類の橙 / 赤の OKLab 色差 ΔE x100 が 3 まで下がった)。
+  - 密度 1 での種類間の最小 ΔE x100 (計算値、カッコ内はパレットそのままの値): 3 種類 29 (25)、6 種類 14 (11)、10 種類 5 (7)。10 種類では橙と琥珀 (隣り合う暖色) が近いが、これはパレットの色相の間隔 (23°) によるもので、パレットは変えていない。
+- 細かい場: スプラット 0.4 倍 (実効 0.2 rMax)、small ぼかし 0.4 倍 (glass より粗く、cell より細かい。粒がくっきり出る)。large ぼかしは縮めない (体の輪郭用)。`threshold` は small の小器官だけに効き、`thresholdScale` (1.6) 倍の実効 2.4 が既定 (殻の弧・小さな器官が出る。ごみは `scopeSpeck` が隠すので高くしなくてよい)。体の輪郭・細胞質は `threshold` を動かしても変わらない。
+- GUI に出す項目: `threshold` / `blurLarge` / `scopeStain` / `scopeVignette` / `scopeSpeck` (+ 共通の `blurSmall` など)。`speciesTint` は使わない (種類の色は染色に直接入る)。
 
 ### cell
 
@@ -132,20 +163,20 @@ st3 の式そのまま: `glow = max((1-n)^2 - (1-m)^2, 0) * 4 * glowIntensity`�
 | パラメータ | 既定 | 範囲 (GUI) | 意味 |
 |---|---|---|---|
 | `renderMode` | `'organic'` | `dots` / `organic` | |
-| `organicStyle` | `'glass'` | `glass` / `cell` / `glow` / `bands` / `mono` | スタイル固有の項目 (`blurLarge` / `speciesTint` を含む) は、そのスタイルが読むときだけ GUI に出る |
+| `organicStyle` | `'glass'` | `glass` / `cell` / `scope` | スタイル固有の項目 (`blurLarge` / `speciesTint` を含む) は、そのスタイルが読むときだけ GUI に出る。表にないスタイル名 (廃止した glow / bands / mono など) は glass として描く |
 | `fieldScale` | 0.5 | 0.25 / 0.5 / 1 | field の解像度 (canvas に対する比)。重い場合は下げる |
 | `splatRadius` | 0.5 | 0.2〜1.5 | スプラット半径 (x rMax) |
 | `fieldGain` | 1 | 0.2〜4 | 正規化した場への倍率 (全スタイル) |
 | `blurSmall` | 0.15 | 0.05〜1.5 | small (disk) ぼかしの σ (x rMax) |
-| `blurLarge` | 0.45 | 0.3〜4 | large (ring) ぼかしの σ (x rMax)。広いときは低解像度で計算。bands は使わない |
-| `speciesTint` | 0.3 | 0〜1 | 種類の色をスタイルの色へ混ぜる量 (bands は半分の強さ、glass は使わない: 種類の色は核だけ) |
-| `threshold` | 1.5 | 0.05〜4 | cell / glow / mono: 平均密度の何倍未満を「空き」とするか |
-| `glowIntensity` | 1 | 0〜3 | glow: 輪郭の明るさ |
-| `bandFreq` | 25 | 1〜100 | bands: 縞の周波数 (位相 = `bandFreq * r^3`) |
-| `bandBase` | 0.24 | 0.05〜0.6 | bands: 空き (密度 0) の r。`bandFreq * bandBase^3 ≈ 0.35` で st1 と同じ明るい青 |
+| `blurLarge` | 0.45 | 0.3〜4 | large (ring) ぼかしの σ (x rMax)。広いときは低解像度で計算 |
+| `speciesTint` | 0.3 | 0〜1 | cell: 種類の色をスタイルの色へ混ぜる量 (glass は使わない: 種類の色は核だけ。scope も使わない) |
+| `threshold` | 1.5 | 0.05〜4 | cell / scope: 平均密度の何倍未満を「空き」とするか (scope は `thresholdScale` 1.6 倍で、small の小器官だけに効く) |
 | `nucleusThreshold` | 0.7 | 0.3〜0.99 | cell: 核が始まる large ぼかしの占有度 |
 | `coreThreshold` | 0.8 | 0.3〜0.99 | glass: 核 (種類の色の平らな塊) が始まる密度 (圧縮後、0..1。shape の指標のしきい値)。以前は `nucleusThreshold` と共用だったが、意味も最適値も違うので分けた |
 | `rimStrength` | 1.3 | 0〜2 | glass: 膜の線の太さ・濃さ |
+| `scopeStain` | 1.5 | 0〜4 | scope: 染色の強さ (密度 1 の吸光度。1.5 で密度 1 がちょうど染色の色、大きいほど濃く暗い、小さいほど淡い) |
+| `scopeVignette` | 0.6 | 0〜1 | scope: 接眼レンズのビネットの強さ (0 = 一様な照明) |
+| `scopeSpeck` | 1 | 0〜1 | scope: 小器官に要る周りの体の濃さ (`n >= 0.2 * scopeSpeck`)。1 = 体の中だけ、0 = 体の外の小さな塊も描く |
 | `showParticles` | false | | 粒子 (半径半分、alpha 0.3) を上に重ねる |
 
 以前の `edge` / `coreBoost` / `stretch` と、旧 `threshold` (メタボールのしきい値) は廃止。`threshold` は上記の意味に変わった。
@@ -153,11 +184,13 @@ st3 の式そのまま: `glow = max((1-n)^2 - (1-m)^2, 0) * 4 * glowIntensity`�
 
 ## 調整のコツ (目で見て決める所)
 
-- 構造の大きさは rMax 基準 (実測: 1 つの塊の半径がおよそ 0.5〜1 rMax)。輪郭が太すぎる / 細すぎるときは `blurLarge` と `splatRadius` を同じ向きに動かす。glow は large の σ が塊の半径に近いと塊全体が光り、半径より小さいと縁だけ光る。
+- 構造の大きさは rMax 基準 (実測: 1 つの塊の半径がおよそ 0.5〜1 rMax)。輪郭が太すぎる / 細すぎるときは `blurLarge` と `splatRadius` を同じ向きに動かす。
 - cell の核は `blurLarge` が大きいほど出にくい (n が下がる)。`nucleusThreshold` を下げるか `blurLarge` を下げる。
 - ガスが見えすぎる / 構造が痩せるときは `threshold` (1.2〜2.0 が実用範囲。2.0 でガスはほぼ消えるが細い膜も消える)。
 - glass で小さな粒が白い縁の欠片として出るときは `coreThreshold` を上げる (0.85 以上では小さな本物の核も消え始める)。
-- bands の縞が細かすぎる (ノイズに見える) ときは `bandFreq` を下げる。空きの青を変えたいときは `bandBase` (位相 `bandFreq * bandBase^3`: 0.35 = 水色、0.8 = 黄緑〜黄、1〜2 = 赤)。芯の色 (飽和したときの位相) は `bandFreq` で動く。
+- scope の背景に細かい粒 (ごみ) が見えるときは `scopeSpeck` を上げる (1 で体の外は描かない。小さな細胞の壁が出るのを避けたいときは `blurLarge` を上げる)。殻の弧・小さな器官が足りないときは `threshold` を下げる (体の輪郭は動かない。下げすぎると体の中が細かくなりすぎる)。
+- scope の種類が見分けにくいときは `scopeStain` を上げる (深い色になる。上げすぎると暗く潰れる)。TEM のように暗い顆粒にしたいときは 3 前後。
+- scope の細胞の壁・小器官の輪郭は `fwidth` の px 幅 (dpr 倍) なので、`blurLarge` / `blurSmall` を変えても線の太さは変わらない。
 
 ## パレット (`src/palette.js`)
 
@@ -171,10 +204,10 @@ st3 の式そのまま: `glow = max((1-n)^2 - (1-m)^2, 0) * 4 * glowIntensity`�
 ## 実装メモ
 
 - `src/organicStyles.js`: スタイル表 (上記)。
-- `src/gpu/shaders/organic.wgsl.js`: `splatWGSL` / `shapeWGSL` / `downsampleWGSL` / `blurWGSL` / `compositeWGSL`。`paperWGSL` (cell の画面固定ノイズ)。`OrganicParams` は 17 個の 4 バイト値 (68 バイト。style / shape だけ u32。fieldW / fieldH / margin は splat と shape の余白付き field の座標用)。フィールド名は config.js の項目名と同じで、JS 側の `ORGANIC_FIELDS` と WGSL の struct の一致は起動時に `assertOrganicLayout` (common.wgsl.js の `assertStructLayout`) が確認する。`BlurParams` は 288 バイト。全画面三角形の頂点シェーダ `FULLSCREEN_VS` は render.wgsl.js のものを fade / blit / organic で共有する。
+- `src/gpu/shaders/organic.wgsl.js`: `splatWGSL` / `shapeWGSL` / `downsampleWGSL` / `blurWGSL` / `compositeWGSL`。`paperWGSL` (cell / scope の画面固定ノイズ)。`OrganicParams` は 17 個の 4 バイト値 (68 バイト。style / shape だけ u32。fieldW / fieldH / margin は splat と shape の余白付き field の座標用)。フィールド名は config.js の項目名と同じで、JS 側の `ORGANIC_FIELDS` と WGSL の struct の一致は起動時に `assertOrganicLayout` (common.wgsl.js の `assertStructLayout`) が確認する。`BlurParams` は 288 バイト。全画面三角形の頂点シェーダ `FULLSCREEN_VS` は render.wgsl.js のものを fade / blit / organic で共有する。
 - `src/gpu/renderer.js`: `updateOrganicLayout` (field の解像度・σ・縮小段数)、`ensureOrganicPlan` / `buildOrganicPlan` (テクスチャ・パス・バインドグループ)、`drawOrganic`、`writeOrganicUniform` (変わったときだけアップロード)、`writeBlurUniforms`、`writeGaussianTaps`。
 - `trails` は organic では無視 (dots に戻したときは従来どおり)。`densityA` は読まない (simulation.js の `needDensity` も無くした。density パスは圧縮の制限が有効なときだけ走る)。
-- 性能の目安 (60,000 粒子、1920x1080、fieldScale 0.5、Intel UHD (内蔵 GPU)、描画 GPU 時間。下記の最適化の前の値): glass ≈ 4.3 ms、bands ≈ 4.7 ms、cell ≈ 11 ms (ノイズが重い)、glow / mono ≈ 7.3 ms。dots は 0.5 ms。
+- 性能の目安 (60,000 粒子、1920x1080、fieldScale 0.5、Intel UHD (内蔵 GPU)、描画 GPU 時間。下記の最適化の前の値): glass ≈ 4.3 ms、cell ≈ 11 ms (ノイズが重い)。dots は 0.5 ms。scope は NVIDIA (Ampere)・1600x900 の HUD の draw gpu で glass ≈ 0.30 ms、scope ≈ 0.58 ms (softLarge の MRT と large 用の縮小列で +0.02 ms。Intel UHD では未計測)。
 - 最適化 (同じ見た目のまま仕事を減らしたもの。swiftshader 上のタイムスタンプで計測、絶対値は実 GPU と違う):
   - splat の周期境界を「粒子 x 4 instance」から「余白付き field + shape での折り返し」に: 頂点シェーダの実行が 1 粒子 24 回 -> 4 回 (strip 込み)。splat の時間 1/3。
   - cell の画面固定ノイズを焼く: composite の画素ごとのハッシュ計算 (最大 32 回) が textureLoad 1 回に。
@@ -185,7 +218,7 @@ st3 の式そのまま: `glow = max((1-n)^2 - (1-m)^2, 0) * 4 * glowIntensity`�
 ## 受け入れ基準
 
 1. `renderMode = 'dots'` で従来と同一の見た目 (回帰なし)。
-2. 各スタイルが参考の見た目 (上記) の方向になる: glass = 青い平らな背景に白い縁の半透明の細胞と、種類の色の平らな核 (中の縞・混ざりも dots と同じに読める)、glow = 暗い内部と光る輪郭、bands = 画面全体が明るい青で、構造が虹色の輪になり芯は紫、mono = 黒地に白い構造、cell = 青->ミント->淡黄の体 + 紫の核 + 顆粒。
+2. 各スタイルが参考の見た目 (上記) の方向になる: glass = 青い平らな背景に白い縁の半透明の細胞と、種類の色の平らな核 (中の縞・混ざりも dots と同じに読める)、cell = 青->ミント->淡黄の体 + 紫の核 + 顆粒、scope = 淡い背景 + ビネット + 粒状ノイズの上に、細い壁の半透明の細胞と、種類ごとに色相がはっきり違う染色された丸い小器官 (3 / 6 / 10 種類で区別できる)。
 3. 粒子数・画面サイズ・rMax を変えても極端に暗く / 明るくならない (場は平均密度で正規化)。
 4. ウィンドウリサイズ・DPR 変更・trails の ON/OFF・スタイル / 半径の変更で破綻しない。
 5. WebGPU の validation エラーがコンソールに出ない。
