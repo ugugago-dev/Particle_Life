@@ -28,6 +28,14 @@ export class RuleMatrix {
         this.data.fill(0);
     }
 
+    /** Replaces everything (numTypes included) with a square array of rows. */
+    load(rows) {
+        const n = rows.length;
+        if (rows.some((row) => row.length !== n)) throw new Error('rule matrix must be square');
+        this.numTypes = n;
+        this.data = Float32Array.from(rows.flat(), (v) => clamp(v, -1, 1));
+    }
+
     /** Keeps the overlapping top-left block; new entries are random. */
     resize(numTypes, rng = Math.random) {
         const old = this.data;

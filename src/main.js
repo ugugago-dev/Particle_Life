@@ -2,6 +2,7 @@
 
 import { createParams } from './config.js';
 import { RuleMatrix } from './rules.js';
+import { PRESETS, formatRules } from './presets.js';
 import { createPalette } from './palette.js';
 import { createInput } from './input.js';
 import { MatrixEditor } from './ui/matrixEditor.js';
@@ -37,12 +38,21 @@ async function main() {
     }
     const timer = new GpuTimer(device);
 
+    const query = new URLSearchParams(location.search);
+    const advanced = query.has('advanced'); // public page: basic controls only
+    const initialPreset = PRESETS[Number(query.get('preset')) - 1]; // 1-based, undefined if absent / out of range
+
     const params = createParams();
     const rules = new RuleMatrix(params.numTypes);
+    if (initialPreset) {
+        rules.load(initialPreset.rules);
+        params.numTypes = rules.numTypes;
+    }
     const { pointer } = createInput(canvas);
-    const stats = new StatsOverlay(timer.enabled);
+    const stats = advanced ? new StatsOverlay(timer.enabled) : null;
     let palette = createPalette(params.numTypes);
     let rulesDirty = true;
+    let ui = null; // set once lil-gui has loaded
 
     function resize() {
         const cssW = canvas.clientWidth;
@@ -59,7 +69,12 @@ async function main() {
     resize();
     sim.randomize(params.numParticles, rules.numTypes);
 
-    const matrix = new MatrixEditor(document.body, rules, palette, () => { rulesDirty = true; });
+    function rulesEdited() {
+        rulesDirty = true;
+        ui?.markCustom();
+    }
+
+    const matrix = new MatrixEditor(document.body, rules, palette, rulesEdited);
     matrix.setVisible(params.showMatrix);
 
     // reused every frame (no per-frame allocation)
@@ -84,16 +99,34 @@ async function main() {
             rulesDirty = false;
             sim.assignTypes(n);
             matrix.rebuild(rules, palette);
+            ui?.markCustom();
+        },
+        loadPreset(preset) {
+            rules.load(preset.rules);
+            params.numTypes = rules.numTypes;
+            palette = createPalette(rules.numTypes);
+            sim.setRules(rules);
+            rulesDirty = false;
+            sim.randomize(sim.count, rules.numTypes);
+            matrix.rebuild(rules, palette);
         },
         randomizeRules() {
             rules.randomize();
             matrix.refresh();
-            rulesDirty = true;
+            rulesEdited();
         },
         zeroRules() {
             rules.zero();
             matrix.refresh();
-            rulesDirty = true;
+            rulesEdited();
+        },
+        async copyRules() {
+            const text = formatRules(rules);
+            try {
+                await navigator.clipboard.writeText(text);
+            } catch {
+                console.log(text); // no clipboard access (insecure context): copy from the console
+            }
         },
         resetParticles() {
             sim.randomize(sim.count, rules.numTypes);
@@ -106,7 +139,7 @@ async function main() {
     // lil-gui comes from a CDN: load it last so a network problem cannot hide the WebGPU message
     try {
         const { createGUI } = await import('./ui/gui.js');
-        createGUI(params, actions);
+        ui = createGUI(params, actions, { advanced, preset: initialPreset?.name });
     } catch (e) {
         console.error('lil-gui could not be loaded (offline?). Running without the control panel.', e);
     }
@@ -134,13 +167,15 @@ async function main() {
             timestampWrites: timer.simWrites(),
         });
         renderer.draw(encoder, sim, view, timer);
-        const slot = timer.resolve(encoder);
+        const slot = stats ? timer.resolve(encoder) : null;
         device.queue.submit([encoder.finish()]);
         if (slot) timer.collect(slot).then(() => stats.recordGpu(timer.simMs, timer.drawMs));
-        stats.recordCpu(performance.now() - t0);
 
-        const g = sim.grid;
-        stats.tick(now, sim.count, `cells     ${g.nx}x${g.ny} (±${g.reach})`);
+        if (stats) {
+            const g = sim.grid;
+            stats.recordCpu(performance.now() - t0);
+            stats.tick(now, sim.count, `cells     ${g.nx}x${g.ny} (±${g.reach})`);
+        }
     }
     requestAnimationFrame(frame);
 }
