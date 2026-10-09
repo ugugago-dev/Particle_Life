@@ -107,9 +107,33 @@ canvas {
     cursor: pointer;
 }
 
+.matrix-help-touch {
+    display: none;
+}
+
 .matrix-cell:hover {
     outline: 1px solid rgba(255, 255, 255, 0.7);
     outline-offset: -1px;
+}
+
+/* タッチ端末: セルを大きく、操作説明もタッチ向けに */
+@media (pointer: coarse) {
+    :root {
+        --cell: 28px;
+    }
+
+    .matrix-cell {
+        touch-action: none;
+        -webkit-touch-callout: none;
+    }
+
+    .matrix-help-mouse {
+        display: none;
+    }
+
+    .matrix-help-touch {
+        display: inline;
+    }
 }
 
 /* ---- WebGPU unavailable / device lost message (centered) ---- */
@@ -136,6 +160,15 @@ canvas {
 
 .unsupported-hint {
     color: var(--text);
+}
+
+.unsupported-link {
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+    background: var(--panel);
+    color: var(--text);
+    text-decoration: none;
 }
 
 .unsupported-detail {
