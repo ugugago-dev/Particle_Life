@@ -44,6 +44,7 @@ export class CpuSimulation {
   setRules(rules)                       // RuleMatrix をコピーして持つ (呼び出しごとに data を読み直してよい)
   randomize(count, numTypes, rng = Math.random)   // 位置は一様、速度 0、type は i.i.d.
   assignTypes(numTypes, rng = Math.random)        // type だけ振り直す
+  setCount(n, rng = Math.random)        // 先頭の粒子を保持して増減 (増えた分はランダム配置)
   step(params, pointer, steps)          // dt = params.dt で steps 回進める (steps = 0 は何もしない)
 }
 ```
@@ -119,7 +120,7 @@ export class GlRenderer {
 | 項目 | 値 | 理由 |
 |---|---|---|
 | `renderMode` | `'dots'` | phase 1。organic は phase 2 |
-| `numParticles` | 4000 | CPU の予算。ペア評価数は `N × 94` ほど (下記) |
+| `numParticles` | 2500 | CPU の予算。Node 計測で N=4000 はクラスタ形成後 15〜20 ms/step (デスクトップ級 CPU) なので、スマホは 2500 から。ペア評価数は `N × 94` ほど (下記) |
 | `rMax` | `sqrt(30 * A / N)` | 近傍密度を PC 版と同じにする (下記) |
 | `substeps` | 1 | |
 | `particleRadius` | 1.6 (CSS px) | |
@@ -127,12 +128,12 @@ export class GlRenderer {
 | `dt`, `frictionHalfLife`, `forceFactor`, `maxSpeed`, `pressureStrength` ほか | config.js の既定のまま | 見た目の速さを PC 版と揃える |
 
 **密度の不変量は `N * rMax² / A ≈ 30`** (PC 版 60000 粒子・rMax 0.03・16:9 → 30.3)。`config.js` のコメントの `N * rMax²` は 16:9 の `A` を暗黙に含んでいる。縦長のスマホ (A ≈ 0.46) で rMax を固定すると近傍密度が 3.9 倍になり、遅く、見た目も変わる。
-このとき近傍数は `N π rMax² / A = 30π ≈ 94` で一定。ペア評価は 1 ステップ ~ `94 N` (グリッドの走査分で 1.5〜2 倍)。N = 4000 で約 40 万ペア。
+このとき近傍数は `N π rMax² / A = 30π ≈ 94` で一定。ペア評価は 1 ステップ ~ `94 N` (グリッドの走査分で 1.5〜2 倍)。N = 2500 で約 24 万ペア。
 
 - N は固定、**rMax をアスペクト比に合わせて決め直す**: 起動時と、`A` が 20% 以上変わったとき (回転)。`rMax` を変えたら GUI の表示も更新し、粒子は wrap で世界に収める (リセットしない)。
 - `restDensity` は絶対値 (重み付き近傍数) で、上の不変量を守っている限り PC 版と同じ意味になる。
 - `?n=` (粒子数) と `?preset=` (1 始まり。PC 版と同じ) を URL から読む。
-- 自動品質 (任意): 直近 2 秒の平均フレーム時間が 20 ms を超えたら N を 20% 減らす (下限 1500、粒子を末尾から捨てる)。1 回の起動で上げ方向には戻さない。
+- 自動品質 (必須): 直近 2 秒の平均フレーム時間が 20 ms を超えたら `sim.setCount(round(N * 0.8))` で N を減らす (下限 1000)。1 回の起動で上げ方向には戻さない。`?n=` 指定時は無効。
 
 ## 操作 (タッチ)
 
