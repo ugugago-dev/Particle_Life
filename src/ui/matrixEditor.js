@@ -48,6 +48,7 @@ export class MatrixEditor {
         this.touch = null; // 進行中のタッチ { id, cell, x, y, timer, long }
         this.lastTap = null; // { cell, t }
         this.touchUntil = 0; // この時刻まで合成イベントを無視
+        this.onCellEdit = null; // (i, j, value) 編集のたびに呼ぶ (読み出し表示用)
 
         this.grid.addEventListener('click', (e) => {
             if (this.isSynthetic(e)) return;
@@ -143,6 +144,7 @@ export class MatrixEditor {
         this.rules.set(i, j, Math.round(next * 1000) / 1000);
         this.paintCell(i, j);
         this.onChange?.();
+        this.onCellEdit?.(i, j, this.rules.get(i, j));
     }
 
     onTouchDown(e) {
@@ -153,8 +155,10 @@ export class MatrixEditor {
         t.timer = setTimeout(() => {
             t.long = true;
             this.editCell(cell, -CLICK_STEP);
+            navigator.vibrate?.(10);
         }, LONG_PRESS_MS);
         this.touch = t;
+        cell.classList.add('pressing'); // 長押しの進行を CSS で見せる
     }
 
     onTouchMove(e) {
@@ -183,7 +187,10 @@ export class MatrixEditor {
     }
 
     endTouch() {
-        if (this.touch) clearTimeout(this.touch.timer);
+        if (this.touch) {
+            clearTimeout(this.touch.timer);
+            this.touch.cell.classList.remove('pressing');
+        }
         this.touch = null;
         this.touchUntil = performance.now() + SYNTH_GUARD_MS;
     }
@@ -197,5 +204,6 @@ export class MatrixEditor {
         this.rules.set(i, j, Math.round(next * 1000) / 1000); // strip float noise
         this.paintCell(i, j);
         this.onChange?.();
+        this.onCellEdit?.(i, j, this.rules.get(i, j));
     }
 }

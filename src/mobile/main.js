@@ -5,10 +5,13 @@ import { RuleMatrix } from '../rules.js';
 import { PRESETS, formatRules } from '../presets.js';
 import { createPalette } from '../palette.js';
 import { createInput } from '../input.js';
-import { MatrixEditor } from '../ui/matrixEditor.js';
 import { StatsOverlay } from '../ui/stats.js';
-import { CpuSimulation } from './cpuSimulation.js';
 import { GlRenderer } from './glRenderer.js';
+import { createToolbar } from './ui/toolbar.js';
+import { createRulesSheet } from './ui/rulesSheet.js';
+import { createSettingsSheet } from './ui/settingsSheet.js';
+import { createImmersive } from './ui/immersive.js';
+import { createToast } from './ui/toast.js';
 
 const DENSITY = 30;          // N * rMax^2 / A の不変量 (PC 版と同じ近傍密度)
 const DEFAULT_N = 2500;
@@ -18,6 +21,18 @@ const RMAX_RETARGET = 0.2;   // A がこの割合以上変わったら rMax を�
 const QUALITY_WINDOW_MS = 2000;
 const QUALITY_SLOW_MS = 20;
 const QUALITY_SHRINK = 0.8;
+
+// sim の生成はここだけ。simClient.js (Worker 版) があればそれ、無い / 失敗なら CpuSimulation
+async function createSimulation() {
+    try {
+        const { createSim } = await import('./simClient.js');
+        return await createSim();
+    } catch (e) {
+        console.info('simClient.js を使えないため CpuSimulation にします', e?.message ?? e);
+        const { CpuSimulation } = await import('./cpuSimulation.js');
+        return new CpuSimulation();
+    }
+}
 
 function showUnsupported(reason) {
     const el = document.createElement('div');
@@ -33,25 +48,16 @@ function showUnsupported(reason) {
     console.error('[WebGL2]', reason);
 }
 
-function makeButton(label, title, onClick) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = label;
-    b.title = title;
-    b.setAttribute('aria-label', title);
-    b.addEventListener('click', onClick);
-    return b;
-}
-
-function main() {
+async function main() {
     const canvas = document.querySelector('#canvas');
-    const toolbar = document.querySelector('#toolbar');
+    const toolbarEl = document.querySelector('#toolbar');
+    const edgeEl = document.querySelector('#edge-reveal');
 
     let renderer;
     try {
         renderer = GlRenderer.create(canvas);
     } catch (e) {
-        toolbar.hidden = true;
+        toolbarEl.hidden = true;
         return showUnsupported(String(e?.message ?? e));
     }
 
@@ -62,8 +68,10 @@ function main() {
     const fixedN = query.has('n') && Number.isFinite(nQuery) && nQuery >= 1; // 指定時は自動品質を切る
     let autoQuality = !fixedN;
 
+    const canOrganic = () => !!renderer.capabilities?.organic; // organic 担当が立てる
+
     const params = createParams();
-    params.renderMode = 'dots';
+    params.renderMode = canOrganic() ? 'organic' : 'dots';
     params.numParticles = fixedN ? Math.min(Math.round(nQuery), MAX_N) : DEFAULT_N;
     params.substeps = 1;
     params.particleRadius = 1.6;
@@ -74,9 +82,10 @@ function main() {
         rules.load(initialPreset.rules);
         params.numTypes = rules.numTypes;
     }
-    const sim = new CpuSimulation();
+    const sim = await createSimulation();
     const { pointer } = createInput(canvas);
     const stats = advanced ? new StatsOverlay(false) : null;
+    const toast = createToast();
     let palette = createPalette(params.numTypes);
     let rulesDirty = true;
     let ui = null;
@@ -89,6 +98,10 @@ function main() {
     };
     canvas.addEventListener('pointerdown', applyMode);
     canvas.addEventListener('pointermove', applyMode);
+
+    renderer.setContextLostHandler?.((state) => {
+        toast.show(state === 'lost' ? '描画が中断されました。復帰を待っています' : '描画を再開しました', 4000);
+    });
 
     function aspect() {
         const h = canvas.clientHeight;
@@ -122,21 +135,40 @@ function main() {
     sim.randomize(params.numParticles, rules.numTypes);
     recomputeRMax();
 
-    const matrix = new MatrixEditor(document.body, rules, palette, rulesEdited);
-    matrix.setVisible(params.showMatrix);
+    // ---- UI ----
+    let sheetOpen = false;
+    const immersive = createImmersive({
+        toolbar: toolbarEl,
+        edge: edgeEl,
+        isBusy: () => sheetOpen || pointer.active,
+    });
 
-    // ---- ツールバー ----
-    const select = document.createElement('select');
-    select.title = 'プリセット';
-    select.setAttribute('aria-label', 'プリセット');
-    const custom = new Option('カスタム', '');
-    select.append(custom);
-    PRESETS.forEach((p, i) => select.append(new Option(p.name, String(i))));
-    select.value = initialPreset ? String(PRESETS.indexOf(initialPreset)) : '';
+    const toolbar = createToolbar(toolbarEl, {
+        onRun() {
+            params.running = !params.running;
+            toolbar.setRunning(params.running);
+        },
+        onMode() {
+            push = !push;
+            toolbar.setPush(push);
+            applyMode();
+        },
+        onRules: (e) => toggleSheet(rulesUi.sheet, e?.currentTarget),
+        onSettings: (e) => toggleSheet(settingsUi.sheet, e?.currentTarget),
+    });
 
-    function markCustom() {
-        select.value = '';
-        ui?.markCustom?.();
+    function onSheetChange(name) {
+        return (open) => {
+            sheetOpen = open;
+            toolbar.setSheet(open ? name : null);
+            if (!open) immersive.poke();
+        };
+    }
+
+    function toggleSheet(sheet, opener) {
+        if (sheet.isOpen) return sheet.close();
+        if (sheet === settingsUi.sheet) settingsUi.sync();
+        sheet.open(opener);
     }
 
     function rulesEdited() {
@@ -144,43 +176,39 @@ function main() {
         markCustom();
     }
 
-    const runBtn = makeButton('⏯', '実行 / 停止', () => {
-        params.running = !params.running;
-        runBtn.setAttribute('aria-pressed', String(!params.running));
+    function markCustom() {
+        rulesUi.setActivePreset(-1);
+        ui?.markCustom?.();
+    }
+
+    const rulesUi = createRulesSheet({
+        rules,
+        palette,
+        onChange: onSheetChange('rules'),
+        onEdited: rulesEdited,
+        onPreset: (preset, i) => actions.loadPreset(preset, i),
+        onRandom: () => actions.randomizeRules(),
+        onZero: () => actions.zeroRules(),
+        onCopy: async () => {
+            const ok = await actions.copyRules();
+            toast.show(ok ? 'ルールをコピーしました' : 'コンソールに出力しました');
+        },
     });
-    runBtn.setAttribute('aria-pressed', 'false');
+    rulesUi.setActivePreset(initialPreset ? PRESETS.indexOf(initialPreset) : -1);
 
-    const modeBtn = makeButton('引く', '引く / 押す', () => {
-        push = !push;
-        modeBtn.textContent = push ? '押す' : '引く';
-        modeBtn.setAttribute('aria-pressed', String(push));
-        applyMode();
+    const settingsUi = createSettingsSheet({
+        params,
+        onChange: onSheetChange('settings'),
+        canOrganic,
+        getAuto: () => autoQuality,
+        setAuto: (v) => {
+            autoQuality = v;
+            qStart = 0;
+        },
+        setNumParticles: (n) => actions.setNumParticles(n),
+        setNumTypes: (n) => actions.setNumTypes(n),
+        reset: () => actions.resetParticles(),
     });
-    modeBtn.setAttribute('aria-pressed', 'false');
-
-    const matrixBtn = makeButton('ルール', 'ルール行列の開閉', () => {
-        params.showMatrix = !params.showMatrix;
-        matrix.setVisible(params.showMatrix);
-        matrixBtn.setAttribute('aria-pressed', String(params.showMatrix));
-    });
-    matrixBtn.setAttribute('aria-pressed', 'false');
-
-    const randomBtn = makeButton('🎲', 'ルールをランダム', () => actions.randomizeRules());
-    const resetBtn = makeButton('↺', '粒子をリセット', () => actions.resetParticles());
-
-    select.addEventListener('change', () => {
-        const preset = PRESETS[Number(select.value)];
-        if (select.value !== '' && preset) actions.loadPreset(preset);
-    });
-
-    toolbar.append(runBtn, modeBtn, matrixBtn, randomBtn, resetBtn, select);
-
-    // ルール行列パネルがツールバーの上に載るよう高さを CSS 変数へ (mobile.css の --toolbar-h)
-    const syncToolbarHeight = () => {
-        document.documentElement.style.setProperty('--toolbar-h', `${toolbar.offsetHeight}px`);
-    };
-    new ResizeObserver(syncToolbarHeight).observe(toolbar);
-    syncToolbarHeight();
 
     // フレームごとに使い回す
     const view = {
@@ -189,7 +217,7 @@ function main() {
         trails: params.trails,
         pointer,
         pointerRadius: params.pointerRadius,
-        renderMode: 'dots',
+        renderMode: params.renderMode,
         organic: params,
     };
 
@@ -198,6 +226,7 @@ function main() {
             autoQuality = false; // 手動で決めたら自動品質は触らない
             sim.randomize(n, rules.numTypes);
             recomputeRMax();
+            settingsUi.sync();
         },
         setNumTypes(n) {
             rules.resize(n);
@@ -205,30 +234,39 @@ function main() {
             sim.setRules(rules);
             rulesDirty = false;
             sim.assignTypes(n);
-            matrix.rebuild(rules, palette);
+            rulesUi.rebuild(rules, palette);
             markCustom();
         },
         recomputeRMax,
-        loadPreset(preset) {
+        loadPreset(preset, index = PRESETS.indexOf(preset)) {
             rules.load(preset.rules);
             params.numTypes = rules.numTypes;
             palette = createPalette(rules.numTypes);
             sim.setRules(rules);
             rulesDirty = false;
             sim.randomize(sim.count, rules.numTypes);
-            matrix.rebuild(rules, palette);
+            rulesUi.rebuild(rules, palette);
+            rulesUi.setActivePreset(index);
+            settingsUi.sync();
         },
         randomizeRules() {
             rules.randomize();
-            matrix.refresh();
+            rulesUi.refresh();
+            rulesEdited();
+        },
+        zeroRules() {
+            rules.zero();
+            rulesUi.refresh();
             rulesEdited();
         },
         async copyRules() {
             const text = formatRules(rules);
             try {
                 await navigator.clipboard.writeText(text);
+                return true;
             } catch {
                 console.log(text); // クリップボード不可 (非 HTTPS): コンソールから取る
+                return false;
             }
         },
         resetParticles() {
@@ -239,7 +277,7 @@ function main() {
     if (advanced) {
         // lil-gui は CDN: 失敗しても本体は動かす
         import('./mobileGui.js')
-            .then(({ createMobileGUI }) => createMobileGUI(params, actions))
+            .then(({ createMobileGUI }) => createMobileGUI(params, { ...actions, copyRules: () => actions.copyRules().then((ok) => toast.show(ok ? 'ルールをコピーしました' : 'コンソールに出力しました')) }))
             .then((gui) => {
                 ui = gui;
             })
@@ -264,6 +302,8 @@ function main() {
             sim.setCount(Math.max(MIN_N, Math.round(sim.count * QUALITY_SHRINK)));
             params.numParticles = sim.count;
             recomputeRMax();
+            settingsUi.sync();
+            toast.show(`軽くしました: ${sim.count} 粒子`);
         }
         qSum = 0;
         qFrames = 0;
@@ -283,6 +323,7 @@ function main() {
         view.particleRadius = params.particleRadius;
         view.trails = params.trails;
         view.pointerRadius = params.pointerRadius;
+        view.renderMode = canOrganic() ? params.renderMode : 'dots';
 
         const t0 = performance.now();
         sim.step(params, pointer, params.running ? params.substeps : 0);
@@ -292,7 +333,8 @@ function main() {
         if (stats) {
             stats.recordCpu(simMs);
             const g = sim.grid;
-            stats.tick(now, sim.count, `cells     ${g.nx}x${g.ny} (±${g.reach})\nrMax      ${params.rMax.toFixed(4)}`);
+            const cells = g ? `cells     ${g.nx}x${g.ny} (±${g.reach})\n` : '';
+            stats.tick(now, sim.count, `${cells}rMax      ${params.rMax.toFixed(4)}`);
         }
     }
 
@@ -313,9 +355,7 @@ function main() {
     if (!document.hidden) rafId = requestAnimationFrame(frame);
 }
 
-try {
-    main();
-} catch (e) {
+main().catch((e) => {
     console.error(e);
     showUnsupported(String(e?.message ?? e));
-}
+});

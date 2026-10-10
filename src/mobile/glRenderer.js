@@ -1,5 +1,7 @@
 // WebGL2 レンダラ (スマホ版): dots / トレイル / ポインタ円。見た目は src/gpu/shaders/render.wgsl.js と src/gpu/renderer.js に合わせる
-// view = { palette, particleRadius (CSS px), trails, pointer, pointerRadius (ワールド単位), renderMode, organic }
+// view = { palette, particleRadius (CSS px), trails, pointer, pointerRadius (ワールド単位), renderMode, organic, rMax }
+
+import { OrganicGl } from './organicGl.js';
 
 const MAX_DPR = 2;
 const MAX_PALETTE = 16;
@@ -99,7 +101,8 @@ export class GlRenderer {
         this.canvas = canvas;
         this.gl = gl;
         this.dpr = 1;
-        this.capabilities = { halfFloatRT: false, floatBlend: false, maxTextureSize: 0 };
+        this.capabilities = { halfFloatRT: false, floatBlend: false, maxTextureSize: 0, organic: false };
+        this.organic = null;
         this.onContextLost = null;
         this.scratch = new Float32Array(0);   // (x, y, type) interleaved
         this.paletteData = new Float32Array(MAX_PALETTE * 4);
@@ -107,6 +110,7 @@ export class GlRenderer {
 
         this.onLost = (e) => {
             e.preventDefault();
+            this.organic = null;   // 失った資源は消さずに捨てる
             this.onContextLost?.('lost');
         };
         this.onRestored = () => {
@@ -153,6 +157,8 @@ export class GlRenderer {
         caps.halfFloatRT = !!(gl.getExtension('EXT_color_buffer_half_float') || gl.getExtension('EXT_color_buffer_float'));
         caps.floatBlend = !!gl.getExtension('EXT_float_blend');
         caps.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+        this.organic = OrganicGl.create(gl);   // rgba16f に描けなければ null (organic は dots へフォールバック)
+        caps.organic = !!this.organic;
 
         if (this.canvas.width > 0) gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     }
@@ -288,7 +294,7 @@ export class GlRenderer {
         gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, 9);
     }
 
-    /** organic は phase 2。今は dots にフォールバック */
+    /** organic は能力があれば organicGl で、無ければ dots で描く */
     draw(sim, view) {
         const gl = this.gl;
         if (gl.isContextLost()) return;
@@ -297,6 +303,13 @@ export class GlRenderer {
         gl.enable(gl.BLEND);
         gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         if (sim.count > 0) this.uploadParticles(sim);
+
+        if (view.renderMode === 'organic' && this.organic && sim.count > 0 && this.drawOrganic(sim, view)) {
+            if (pointerOn) this.drawPointer(sim, view);
+            if (this.trailTex) this.releaseTrailTarget();
+            this.needsTrailClear = true;
+            return;
+        }
 
         if (!view.trails) {
             gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -338,11 +351,33 @@ export class GlRenderer {
         }
     }
 
+    /** organicGl で描く。FBO が作れなければ organic を無効にして false (この回から dots) */
+    drawOrganic(sim, view) {
+        try {
+            this.organic.draw(sim, view, { vao: this.particleVao, dpr: this.dpr });
+            return true;
+        } catch (e) {
+            console.warn('[organic] disabled:', e?.message ?? e);
+            this.organic.dispose();
+            this.organic = null;
+            this.capabilities.organic = false;
+            const gl = this.gl;
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+            gl.enable(gl.BLEND);
+            gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            return false;
+        }
+    }
+
     dispose() {
         this.canvas.removeEventListener('webglcontextlost', this.onLost);
         this.canvas.removeEventListener('webglcontextrestored', this.onRestored);
         const gl = this.gl;
+        const organic = this.organic;
+        this.organic = null;
         if (gl.isContextLost()) return;
+        organic?.dispose();
         this.releaseTrailTarget();
         for (const p of Object.values(this.programs)) gl.deleteProgram(p);
         gl.deleteBuffer(this.particleVbo);
