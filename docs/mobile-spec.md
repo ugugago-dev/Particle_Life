@@ -192,3 +192,31 @@ PC 版の organic (`docs/organic-rendering-spec.md`) は WebGPU の MRT・rgba16
 3. CDP の CPU スロットル 4x で 4000 粒子の 1 フレームの時間を測る。目標は実機換算で 16 ms 以下 (=スロットル下で ~ 60 ms 以内を目安)。
 4. 縦向き (390x844)・横向き (844x390) の両方で `rMax` が `sqrt(30 A / N)` に追従する。
 5. PC 版 `index.html` が従来どおり (WebGPU が無い環境ではメッセージにリンクが出る)。
+
+## 最適化 (担当 Opus: `cpuSimulation.js`、新規 `simWorker.js` / `simClient.js`、テスト、`tests/bench.mjs`)
+
+目標: 同じ物理 (総当たりテストが通る) のまま、N=4000・クラスタ形成後 (現状 Node で 15〜20 ms/step) を大きく速くする。必ず**計測してから**入れ、効いたものだけ残す。候補:
+
+- 計算の統合・削減: density と force のループ統合 (圧力が効かない粒子の省略など、結果が変わらない範囲で)、`rules` の行を事前に取り出す、ペアごとの除算・sqrt の削減、`d2 >= rMax²` の早期棄却を先頭に。
+- メモリ: 並べ替えコピーの Float64 → Float32 (精度は許容誤差内か確認)、ライブ配列自体をセル順に定期的に並べ替えて局所性を上げる (粒子 id は保つ)、前フレームの並びから差分で再ソート。
+- Worker 化 (SharedArrayBuffer は使わない): シミュレーションを Worker で回し、位置・type の snapshot を **transferable な ArrayBuffer を往復** させて main に渡す (ダブル / トリプルバッファ)。`SimClient` は `CpuSimulation` と同じ公開面 (`count, numTypes, world, x, y, type, grid, setWorld, setRules, randomize, assignTypes, setCount, step`) を持ち、`step` は Worker へ非同期に依頼するだけで即座に返り、`x/y/type` は最新の完了 snapshot を指す。main の描画が sim 待ちで止まらないこと。Worker が使えない環境では `CpuSimulation` に自動で戻す (`createSim()` を `simClient.js` から export し、main.js はそれだけ呼ぶ)。
+- 検証: `tests/cpuSimulation.test.mjs` が通ること。`tests/bench.mjs` に、最適化前後を比べる計測 (一様 / 500 ステップ後、A = 0.46 / 1.78、N = 2500 / 4000) を残す。
+
+報告に before / after の表を付ける。
+
+## UI の練り直し (担当 Sonnet: `src/mobile/main.js`、`mobile.html`、`mobile.css`、`src/mobile/mobileGui.js`、`src/ui/matrixEditor.js` と `style.css` の matrix 部分、新規 `src/mobile/ui/*.js`)
+
+画面は「粒子が主役」。操作は親指だけで完結し、既定では最小限の UI だけを出す。
+
+- **ツールバー**: 絵文字 / 文字でなく **インライン SVG のアイコン** (再生/停止、引く/押す、ルール、設定)。ラベルは小さく併記。主操作は 4〜5 個まで。`引く/押す` はポインタ円と同じ色 (緑 / 赤) で状態が分かる。
+- **ボトムシート**: `ルール` と `設定` は画面下から出るシート (ドラッグで閉じる、背景タップで閉じる、`prefers-reduced-motion` を尊重)。シートの高さは内容に応じ、画面の 60% まで。
+  - ルールシート: 行列エディタ (タッチ版) + `🎲 ランダム` `ゼロ` `コピー` + プリセットを**横スクロールのチップ**で (`select` はやめる)。
+  - 設定シート: 品質 (`粒子数` スライダ、`自動品質` スイッチ)、`描画` (`点 / 有機` のセグメント)、`粒子の大きさ`、`軌跡`、`種類数`、`リセット`。`?advanced` のときだけ詳細 (lil-gui か折りたたみ) を追加。
+- **没入モード**: 操作が 4 秒無いとツールバーが薄くなって隠れ (画面の端のタップで戻る)、ステータス表示も消える。ダブルタップや誤タップで物理ポインタを起こさない (UI 上のタップは canvas に届かない)。
+- **フィードバック**: 自動品質で粒子数を減らしたら小さなトースト (「軽くしました: 2000 粒子」)。WebGL2 非対応・context lost のメッセージも同じ体裁。
+- **見た目**: ダーク背景に合わせ、半透明パネル (backdrop-filter はあれば使う) と 12px 角丸、フォントは system-ui、タップ領域は 44px 以上、コントラスト AA、`env(safe-area-inset-*)` を全方向で考慮。縦・横の両方で破綻しない (横は左右どちらかの端にシートを出してもよい)。
+- **アクセシビリティ**: ボタンは `<button>` + `aria-label`、シートは `role="dialog"` + `aria-modal`、フォーカス移動、トグルは `aria-pressed`。
+- **描画の切り替え**: `view.renderMode` に `'dots' | 'organic'` を入れる。`renderer.capabilities.organic` が偽なら `有機` を無効表示にして dots のまま。既定は能力があれば `organic`、なければ `dots`。organic の実装は別担当が並行して作っている (`src/mobile/organicGl.js` / `glRenderer.js` は**編集しない**。`view.organic` には `params` をそのまま渡す)。
+- **sim の生成**: `createSim()` (`src/mobile/simClient.js`、別担当が並行して作る) を呼ぶ。それが無い間は `CpuSimulation` を直接使い、import は 1 か所にまとめる。
+
+検証 (UI 担当): 390x844 / 844x390 / 360x640 / 768x1024 のスクリーンショットを撮り、シート開閉・ツールバー自動隠れ・ルール編集 (タップ / 長押し)・プリセット切替・設定変更が動き、コンソールエラー 0。見た目は自分で画像を見て崩れを直す。
