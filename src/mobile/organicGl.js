@@ -1,14 +1,15 @@
-// organic 描画 (スマホ版、glass のみ)。PC 版 src/gpu/renderer.js と organic.wgsl.js の glass を WebGL2 へ移植 (docs/mobile-spec.md の phase 2)
+// organic 描画 (スマホ版、scope / glass)。PC 版 src/gpu/renderer.js と organic.wgsl.js を WebGL2 へ移植 (docs/mobile-spec.md の phase 2)
 
 import { ORGANIC_STYLES } from '../organicStyles.js';
 
-const FINE = ORGANIC_STYLES.glass.fine;   // スプラット / small / large の倍率
 const MAX_PALETTE = 16;
 const SIGMA_MAX_TEXELS = 4;               // これを超える σ は 1/2 ずつ縮小してからぼかす
 const MAX_BLUR_LEVEL = 6;
 const MAX_PAIRS = 6;                      // 中心 + 6 ペア = 最大 13 フェッチ
 const DEFAULT_FIELD_SCALE = 0.25;
 const PC_RMAX_PX = 0.03 * 1080;           // PC 版の既定 (rMax 0.03、1080 px) での rMax の px。膜の勾配しきい値はこれで調整されている
+const PC_RMAX_SMALL_TEXELS = 0.03 * 540;  // PC 版の既定 (fieldScale 0.5、ks 0) での rMax の small テクセル数。scope の斜光はこれで調整されている
+const MAX_SOFT_LEVEL = 2;                 // soft 整形はこの段まで field から直接縮小して書く (最大 4x4 フェッチ)
 
 const QUAD = `vec2 quadCorner() { return vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)) * 2.0 - 1.0; }`;
 
@@ -68,6 +69,72 @@ void main() {
 }
 `;
 
+// occupancy 整形 (scope の small): 1 - exp(-2 max(v - threshold, 0))。threshold は thresholdScale 倍済み
+const SHAPE_OCC_FS = `#version 300 es
+precision highp float;
+uniform sampler2D uSrc;
+uniform float uGain;
+uniform float uThreshold;
+out vec4 outColor;
+void main() {
+  vec4 f = texelFetch(uSrc, ivec2(gl_FragCoord.xy), 0);
+  float v = max(f.a * uGain, 0.0);
+  float c = 1.0 - exp(-2.0 * max(v - uThreshold, 0.0));
+  outColor = vec4(f.rgb / max(f.a, 1e-4) * c, c);
+}
+`;
+
+// soft 整形 (scope の large) 1 - exp(-(v / 5)^2) をテクセルごとに掛けてから uFactor^2 の箱平均で縮小 (shape + 縮小を 1 パスに)
+const SOFT_DOWN_FS = `#version 300 es
+precision highp float;
+uniform sampler2D uSrc;
+uniform float uGain;
+uniform int uFactor;
+out vec4 outColor;
+void main() {
+  ivec2 base = ivec2(gl_FragCoord.xy) * uFactor;
+  ivec2 hi = textureSize(uSrc, 0) - 1;
+  vec4 acc = vec4(0.0);
+  for (int j = 0; j < ${1 << MAX_SOFT_LEVEL}; j++) {
+    if (j >= uFactor) break;
+    for (int i = 0; i < ${1 << MAX_SOFT_LEVEL}; i++) {
+      if (i >= uFactor) break;
+      vec4 f = texelFetch(uSrc, min(base + ivec2(i, j), hi), 0);
+      float v = max(f.a * uGain, 0.0) / 5.0;
+      float c = 1.0 - exp(-v * v);
+      acc += vec4(f.rgb / max(f.a, 1e-4) * c, c);
+    }
+  }
+  outColor = acc / float(uFactor * uFactor);
+}
+`;
+
+// scope の画面固定のノイズ (organic.wgsl.js の paperWGSL): r = 粒状、g = 縁の揺らぎ・照明むら、b = 染色のむら
+const PAPER_FS = `#version 300 es
+precision highp float;
+uniform float uDpr;
+uniform float uLowScale;              // 低周波 (g, b) の周波数の倍率 (rMax の px が PC の基準と違う分)
+out vec4 outColor;
+float hash21(vec2 p) {
+  vec3 p3 = fract(vec3(p.x, p.y, p.x) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+float vnoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), u.x), mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+float fbm(vec2 p) { return 0.5 * vnoise(p) + 0.3 * vnoise(p * 2.03 + 17.1) + 0.2 * vnoise(p * 4.1 + 41.7); }
+void main() {
+  vec2 px = gl_FragCoord.xy / uDpr;
+  vec2 lo = px * uLowScale;
+  float grain = 0.6 * vnoise(px * 0.8) + 0.4 * vnoise(px * 2.3 + 9.1);
+  outColor = vec4(grain, fbm(lo * 0.045), fbm(lo * 0.11 + 5.3), 1.0);
+}
+`;
+
 // 2x2 の箱平均で 1/2 に縮小 (端はクランプ)
 const DOWN_FS = `#version 300 es
 precision highp float;
@@ -101,20 +168,8 @@ void main() {
 }
 `;
 
-// glass の着色 (organic.wgsl.js の glassStyle の移植。WGSL は uv.y = 0 が上なので 1 - uv.y)
-const COMPOSITE_FS = `#version 300 es
-precision highp float;
-uniform sampler2D uSmall;
-uniform sampler2D uLarge;
-uniform vec2 uCanvas;
-uniform float uDpr;
-uniform float uRim;
-uniform float uGradScale;             // 膜を消す勾配のしきい値の倍率 (rMax の px が PC の基準と違う分)
-out vec4 outColor;
-const float GLASS_EDGE = 0.2;
-float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
-float aaStep(float x, float edge) { return clamp((x - edge) / max(fwidth(x) * 1.3, 1e-4) + 0.5, 0.0, 1.0); }
 // 3 次 B スプラインを 4 回のバイリニアで (large は ~16 倍に引き伸ばすので、バイリニアだと fwidth がテクセルごとに段になり膜が折れ線になる)
+const BSPLINE_GLSL = `
 vec4 bspline(sampler2D t, vec2 uv) {
   vec2 size = vec2(textureSize(t, 0));
   vec2 p = uv * size - 0.5;
@@ -132,6 +187,22 @@ vec4 bspline(sampler2D t, vec2 uv) {
   return g0.y * (g0.x * texture(t, h0) + g1.x * texture(t, vec2(h1.x, h0.y)))
        + g1.y * (g0.x * texture(t, vec2(h0.x, h1.y)) + g1.x * texture(t, h1));
 }
+`;
+
+// glass の着色 (organic.wgsl.js の glassStyle の移植。WGSL は uv.y = 0 が上なので 1 - uv.y)
+const COMPOSITE_FS = `#version 300 es
+precision highp float;
+uniform sampler2D uSmall;
+uniform sampler2D uLarge;
+uniform vec2 uCanvas;
+uniform float uDpr;
+uniform float uRim;
+uniform float uGradScale;             // 膜を消す勾配のしきい値の倍率 (rMax の px が PC の基準と違う分)
+out vec4 outColor;
+const float GLASS_EDGE = 0.2;
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+float aaStep(float x, float edge) { return clamp((x - edge) / max(fwidth(x) * 1.3, 1e-4) + 0.5, 0.0, 1.0); }
+${BSPLINE_GLSL}
 void main() {
   vec2 uv = gl_FragCoord.xy / uCanvas;
   vec4 s = texture(uSmall, uv);
@@ -154,6 +225,131 @@ void main() {
   vec3 outline = clamp(mix(vec3(luma(Cs)), Cs, 1.25) * 0.62, 0.0, 1.0);
   col = mix(col, Cs, coreA);
   col = mix(col, outline, ring);
+  outColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+}
+`;
+
+// scope の着色 (organic.wgsl.js の scopeStyle の移植)。y は GL の上向きなので斜光の勾配だけ画面の下向きに直す
+const SCOPE_FS = `#version 300 es
+precision highp float;
+uniform sampler2D uSmall;
+uniform sampler2D uLarge;
+uniform sampler2D uPaper;
+uniform vec2 uCanvas;
+uniform float uDpr;
+uniform float uGradScale;             // 壁を消す勾配のしきい値の倍率 (rMax の px が PC の基準と違う分)
+uniform float uReliefScale;           // 斜光の勾配の倍率 (rMax の small テクセル数が PC の基準と違う分)
+uniform float uStain;
+uniform float uVignette;
+uniform float uSpeck;
+out vec4 outColor;
+const vec3 SCOPE_BG = vec3(0.93, 0.94, 0.88);
+const float SCOPE_EDGE = 0.2;
+const float SCOPE_GATE = 0.2;
+const float SCOPE_BODY = 0.35;
+const float SCOPE_CYTO = 0.1;
+const float SCOPE_STAIN_REF = 1.5;
+const vec2 SCOPE_LIGHT = vec2(-0.6, -0.8);
+const float SCOPE_SLOPE = 3.0;
+const float SCOPE_RELIEF = 0.18;
+const float SCOPE_SPEC = 0.15;
+const float STAIN_DL = 0.15;
+const float STAIN_CHROMA = 1.2;
+const float STAIN_CMAX = 0.19;
+${BSPLINE_GLSL}
+vec3 srgbToLinear(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), greaterThan(c, vec3(0.04045))); }
+vec3 linearToSrgb(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, greaterThan(c, vec3(0.0031308))); }
+vec3 toOklab(vec3 c) {
+  vec3 lms = pow(max(vec3(
+    dot(vec3(0.4122214708, 0.5363325363, 0.0514459929), c),
+    dot(vec3(0.2119034982, 0.6806995451, 0.1073969566), c),
+    dot(vec3(0.0883024619, 0.2817188376, 0.6299787005), c)), vec3(0.0)), vec3(1.0 / 3.0));
+  return vec3(
+    dot(vec3(0.2104542553, 0.7936177850, -0.0040720468), lms),
+    dot(vec3(1.9779984951, -2.4285922050, 0.4505937099), lms),
+    dot(vec3(0.0259040371, 0.7827717662, -0.8086757660), lms));
+}
+vec3 fromOklab(vec3 lab) {
+  vec3 lms = vec3(
+    lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z,
+    lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z,
+    lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z);
+  vec3 c = lms * lms * lms;
+  return vec3(
+    dot(vec3(4.0767416621, -3.3077115913, 0.2309699292), c),
+    dot(vec3(-1.2684380046, 2.6097574011, -0.3413193965), c),
+    dot(vec3(-0.0041960863, -0.7034186147, 1.7076147010), c));
+}
+// 種類の色 -> 密度 1 の染色の色 (OKLCH の色相を保って彩度を上げ L を下げる。範囲外は同じ L の灰色へ寄せる)
+vec3 stainColor(vec3 c) {
+  vec3 lab = toOklab(srgbToLinear(c));
+  float chroma = length(lab.yz);
+  float t = smoothstep(0.74, 0.9, lab.x);
+  float L = max(lab.x - STAIN_DL * (1.0 - 0.75 * t), 0.0);
+  vec2 ab = chroma > 1e-4 ? lab.yz * (min(chroma * STAIN_CHROMA, STAIN_CMAX) / chroma) : vec2(0.0);
+  vec3 rgb = fromOklab(vec3(L, ab));
+  vec3 gray = vec3(L * L * L);
+  vec3 over = mix(vec3(1e3), (1.0 - gray) / (rgb - gray), greaterThan(rgb, vec3(1.0)));
+  vec3 under = mix(vec3(1e3), gray / (gray - rgb), lessThan(rgb, vec3(0.0)));
+  float k = min(1.0, min(min(min(over.x, over.y), over.z), min(min(under.x, under.y), under.z)));
+  return clamp(linearToSrgb(clamp(gray + (rgb - gray) * k, 0.0, 1.0)), 0.03, 1.0);
+}
+vec3 stainTransmit(vec3 c) { return min(stainColor(c) / SCOPE_BG, vec3(1.0)); }
+void main() {
+  vec2 uv = gl_FragCoord.xy / uCanvas;
+  vec3 noise = texelFetch(uPaper, ivec2(gl_FragCoord.xy), 0).rgb;
+  vec4 s = bspline(uSmall, uv);       // small も ~4 倍に引き伸ばすので、バイリニアだと小器官の輪郭が多角形になる
+  vec4 l = bspline(uLarge, uv);
+  float m = s.a;
+  float n = l.a + (noise.g - 0.5) * 0.08;
+  float fwN = fwidth(n);
+  // m の勾配は small の ±1 テクセルの中央差分 (fwidth は 4 倍に引き伸ばした平らな所で 2x2 ごとに乱れ、輪郭線が櫛状になる)。gd.y は画面の下向き
+  vec2 e = 1.0 / vec2(textureSize(uSmall, 0));
+  vec2 gd = vec2(0.0);
+  if (m > 0.05) {
+    gd = vec2(
+      textureLod(uSmall, uv + vec2(e.x, 0.0), 0.0).a - textureLod(uSmall, uv - vec2(e.x, 0.0), 0.0).a,
+      textureLod(uSmall, uv - vec2(0.0, e.y), 0.0).a - textureLod(uSmall, uv + vec2(0.0, e.y), 0.0).a);
+  }
+  vec2 gm = gd * 0.5 / (e * uCanvas);
+  float fwM = abs(gm.x) + abs(gm.y);
+  float k = uStain / SCOPE_STAIN_REF;
+  float w = uDpr;
+  vec3 line = vec3(1.0, 1.0, 0.96);
+
+  vec3 col = SCOPE_BG * (1.0 + 0.05 * (noise.g - 0.5));
+  float dist = (n - SCOPE_EDGE) / max(fwN, 1e-4);
+  float inside = clamp(dist + 0.5, 0.0, 1.0);
+  if (inside > 0.0) col *= mix(vec3(1.0), pow(stainTransmit(l.rgb / max(l.a, 1e-4)), vec3(SCOPE_CYTO * uStain)), inside);
+  float fade = smoothstep(0.002 * uGradScale, 0.005 * uGradScale, fwN);
+  col = mix(col, line, 0.7 * clamp(0.6 * w + 0.5 - abs(dist + 1.6 * w), 0.0, 1.0) * fade);
+  col = mix(col, vec3(0.32, 0.33, 0.33), 0.65 * clamp(0.7 * w + 0.5 - abs(dist), 0.0, 1.0) * fade);
+
+  float d = (m - SCOPE_BODY) / max(fwM, 1e-4);
+  float gate = uSpeck <= 0.0 ? 1.0 : clamp((n - SCOPE_GATE * uSpeck) / max(fwN * 1.3, 1e-4) + 0.5, 0.0, 1.0);
+  float cover = clamp(d + 0.5, 0.0, 1.0) * gate;
+  float edgeFade = smoothstep(0.015 * uGradScale, 0.045 * uGradScale, fwM);    // 鞍点 (勾配 ~0) では輪郭線を出さない (スマホ版だけ)
+  col = mix(col, line, 0.4 * clamp(0.5 * w + 0.5 - abs(d + 1.5 * w), 0.0, 1.0) * gate * edgeFade);
+  if (cover > 0.0) {
+    vec3 T = stainTransmit(s.rgb / max(s.a, 1e-4));
+    vec2 g = gd * uReliefScale;
+    float tilt = -dot(g, SCOPE_LIGHT) * SCOPE_SLOPE;
+    vec3 nrm = normalize(vec3(-g * SCOPE_SLOPE, 1.0));
+    float spec = pow(clamp(dot(nrm, normalize(vec3(SCOPE_LIGHT * 0.5, 1.0))), 0.0, 1.0), 48.0);
+    float thick = mix(0.7, 1.0, smoothstep(0.15, 0.85, l.a));
+    vec3 body = col * pow(T, vec3(k * m * thick * (1.0 + 1.2 * (noise.r - 0.5) + (noise.b - 0.5))));
+    body *= 1.0 + SCOPE_RELIEF * clamp(tilt, -1.0, 1.0);
+    body *= 1.0 - 0.2 * smoothstep(0.85, 1.0, l.a);
+    body += SCOPE_SPEC * spec;
+    float ring = cover * (1.0 - clamp(d - 1.3 * w + 0.5, 0.0, 1.0)) * edgeFade;
+    vec3 outline = col * pow(T, vec3(k * 2.2)) * 0.6;
+    col = mix(col, body, cover);
+    col = mix(col, outline, ring);
+  }
+
+  col *= 1.0 + 0.16 * (noise.r - 0.5);
+  float r = length((uv - 0.5) * uCanvas) / length(0.5 * uCanvas);
+  col *= 1.0 - 0.55 * uVignette * smoothstep(0.4, 1.0, r);
   outColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }
 `;
@@ -248,13 +444,14 @@ function compileProgram(gl, label, vsSrc, fsSrc) {
     return { program: p, u };
 }
 
-/** rgba16f のテクスチャ + FBO。完全でなければ throw */
-function makeTarget(gl, w, h) {
+/** テクスチャ + FBO (既定 rgba16f。paper は rgba8 + nearest)。完全でなければ throw */
+function makeTarget(gl, w, h, format = gl.RGBA16F) {
+    const filter = format === gl.RGBA16F ? gl.LINEAR : gl.NEAREST;
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA16F, w, h);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, format, w, h);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
     const fbo = gl.createFramebuffer();
@@ -266,7 +463,7 @@ function makeTarget(gl, w, h) {
     const target = { tex, fbo, w, h };
     if (status !== gl.FRAMEBUFFER_COMPLETE) {
         deleteTarget(gl, target);
-        throw new Error(`organic: rgba16f framebuffer incomplete (0x${status.toString(16)})`);
+        throw new Error(`organic: framebuffer incomplete (0x${status.toString(16)})`);
     }
     return target;
 }
@@ -296,9 +493,13 @@ export class OrganicGl {
         this.programs = {
             splat: compileProgram(gl, 'splat', SPLAT_VS, SPLAT_FS),
             shape: compileProgram(gl, 'shape', FULLSCREEN_VS, SHAPE_FS),
+            shapeOcc: compileProgram(gl, 'shape occupancy', FULLSCREEN_VS, SHAPE_OCC_FS),
+            softDown: compileProgram(gl, 'soft downsample', FULLSCREEN_VS, SOFT_DOWN_FS),
+            paper: compileProgram(gl, 'paper', FULLSCREEN_VS, PAPER_FS),
             down: compileProgram(gl, 'downsample', FULLSCREEN_VS, DOWN_FS),
             blur: compileProgram(gl, 'blur', FULLSCREEN_VS, BLUR_FS),
             composite: compileProgram(gl, 'composite', FULLSCREEN_VS, COMPOSITE_FS),
+            scope: compileProgram(gl, 'scope', FULLSCREEN_VS, SCOPE_FS),
             dots: compileProgram(gl, 'dots', DOTS_VS, DOTS_FS),
         };
         this.emptyVao = gl.createVertexArray();
@@ -312,27 +513,41 @@ export class OrganicGl {
         this.tapCache = new Map();
     }
 
-    /** field / 縮小列 / ぼかしの FBO を、解像度か段数が変わったときだけ作り直す */
-    ensurePlan(fw, fh, ks, kl) {
-        const p = this.plan;
-        if (p && p.fw === fw && p.fh === fh && p.ks === ks && p.kl === kl) return p;
+    /** field / 縮小列 / ぼかし (+ scope の soft 列・paper) の FBO を、解像度・段数・スタイル・paper の条件が変わったときだけ作り直す */
+    ensurePlan(fw, fh, ks, kl, soft, paper) {
+        const key = `${fw}x${fh}/${ks}/${kl}/${soft}/${paper ? `${paper.w}x${paper.h}@${paper.dpr}~${paper.lowScale}` : '-'}`;
+        if (this.plan?.key === key) return this.plan;
         this.releasePlan();
         const gl = this.gl;
         const targets = [];
-        const make = (w, h) => {
-            const t = makeTarget(gl, w, h);
+        const make = (w, h, format) => {
+            const t = makeTarget(gl, w, h, format);
             targets.push(t);
             return t;
         };
+        const half = (t) => [Math.max(1, Math.ceil(t.w / 2)), Math.max(1, Math.ceil(t.h / 2))];
         try {
             const field = make(fw, fh);
             const levels = [make(fw, fh)];
-            for (let k = 1; k <= Math.max(ks, kl); k++) {
-                const prev = levels[k - 1];
-                levels.push(make(Math.max(1, Math.ceil(prev.w / 2)), Math.max(1, Math.ceil(prev.h / 2))));
+            for (let k = 1; k <= (soft ? ks : Math.max(ks, kl)); k++) levels.push(make(...half(levels[k - 1])));
+            // soft 列: field から 2^j0 倍で直接縮小して書き、それより先は箱平均でつなぐ
+            let softLevels = null;
+            let softBase = 0;
+            if (soft) {
+                softBase = Math.min(kl, MAX_SOFT_LEVEL);
+                let size = { w: fw, h: fh };
+                for (let k = 0; k < softBase; k++) [size.w, size.h] = half(size);
+                softLevels = [];
+                softLevels[softBase] = make(size.w, size.h);
+                for (let k = softBase + 1; k <= kl; k++) softLevels[k] = make(...half(softLevels[k - 1]));
             }
             const pair = (lv) => ({ src: lv, tmp: make(lv.w, lv.h), out: make(lv.w, lv.h) });
-            this.plan = { fw, fh, ks, kl, targets, field, levels, small: pair(levels[ks]), large: pair(levels[kl]) };
+            const paperTarget = paper ? make(paper.w, paper.h, gl.RGBA8) : null;
+            this.plan = {
+                key, fw, fh, ks, kl, targets, field, levels, softLevels, softBase,
+                small: pair(levels[ks]), large: pair(soft ? softLevels[kl] : levels[kl]),
+                paper: paperTarget, paperParams: paper, paperDirty: !!paper,
+            };
         } catch (e) {
             for (const t of targets) deleteTarget(gl, t);
             throw e;
@@ -426,12 +641,16 @@ export class OrganicGl {
     }
 
     /**
-     * splat -> shape -> 縮小 -> ぼかし small / large -> composite (+ showParticles) を canvas へ。FBO が作れなければ throw
+     * splat -> shape (+ scope は soft 列) -> 縮小 -> ぼかし small / large -> composite (+ showParticles) を canvas へ。FBO が作れなければ throw
+     * organicStyle が 'glass' なら glass、それ以外は scope (スマホ版は glass / scope だけ)
      * @param {object} ctx { vao: 粒子の instance VAO (glRenderer が詰めたもの), dpr }
      */
     draw(sim, view, ctx) {
         const gl = this.gl;
         const org = view.organic;
+        const scope = org.organicStyle !== 'glass';
+        const style = scope ? ORGANIC_STYLES.scope : ORGANIC_STYLES.glass;
+        const fine = style.fine;
         const rMax = view.rMax ?? org.rMax;
         const { width: W, height: H } = sim.world;
         const cw = gl.canvas.width;
@@ -440,14 +659,30 @@ export class OrganicGl {
         const fw = Math.max(1, Math.round(cw * fieldScale));
         const fh = Math.max(1, Math.round(ch * fieldScale));
         const pxPerWorld = fh / H;
-        const sigmaSmall = Math.max(org.blurSmall * FINE.small * rMax * pxPerWorld, 0.3);
-        const sigmaLarge = Math.max(org.blurLarge * FINE.large * rMax * pxPerWorld, 0.3);
-        const plan = this.ensurePlan(fw, fh, blurLevel(sigmaSmall), blurLevel(sigmaLarge));
+        const rMaxPx = Math.max(rMax * ch / H, 1);
+        const gradScale = Math.min(1, PC_RMAX_PX / rMaxPx);
+        const sigmaSmall = Math.max(org.blurSmall * fine.small * rMax * pxPerWorld, 0.3);
+        const sigmaLarge = Math.max(org.blurLarge * fine.large * rMax * pxPerWorld, 0.3);
+        const ks = blurLevel(sigmaSmall);
+        // paper の低周波は壁の勾配しきい値 (gradScale) と同じ比で伸ばす (ノイズの勾配だけで壁が出ないように)
+        const paper = scope ? { w: cw, h: ch, dpr: ctx.dpr, lowScale: Math.round(gradScale * 1000) / 1000 } : null;
+        const plan = this.ensurePlan(fw, fh, ks, blurLevel(sigmaLarge), scope && !!style.softLarge, paper);
+
+        if (plan.paperDirty) {
+            const pp = this.programs.paper;
+            gl.disable(gl.BLEND);
+            gl.bindVertexArray(this.emptyVao);
+            gl.useProgram(pp.program);
+            gl.uniform1f(pp.u.uDpr, plan.paperParams.dpr);
+            gl.uniform1f(pp.u.uLowScale, plan.paperParams.lowScale);
+            this.fullscreen(plan.paper, pp);
+            plan.paperDirty = false;
+        }
 
         // 平均密度で field = 1 になる重み (仕様書の「正規化」)
         const n = sim.count;
         const meanDensity = Math.max(n / (W * H) * Math.PI * rMax * rMax / 6, 0.5);
-        const splat = org.splatRadius * FINE.splat;
+        const splat = org.splatRadius * fine.splat;
         const radius = splat * rMax;
 
         const pal = view.palette.rgb;
@@ -481,19 +716,32 @@ export class OrganicGl {
         // shape -> 縮小 -> ぼかし
         gl.bindVertexArray(this.emptyVao);
         gl.activeTexture(gl.TEXTURE0);
-        const sh = this.programs.shape;
+        const sh = scope ? this.programs.shapeOcc : this.programs.shape;
         gl.useProgram(sh.program);
         gl.uniform1i(sh.u.uSrc, 0);
         gl.uniform1f(sh.u.uGain, org.fieldGain);
-        gl.uniform1f(sh.u.uCore, org.coreThreshold);
+        if (scope) gl.uniform1f(sh.u.uThreshold, org.threshold * (style.thresholdScale ?? 1));
+        else gl.uniform1f(sh.u.uCore, org.coreThreshold);
         gl.bindTexture(gl.TEXTURE_2D, plan.field.tex);
         this.fullscreen(plan.levels[0], sh);
+        if (plan.softLevels) {
+            const sd = this.programs.softDown;
+            gl.useProgram(sd.program);
+            gl.uniform1i(sd.u.uSrc, 0);
+            gl.uniform1f(sd.u.uGain, org.fieldGain);
+            gl.uniform1i(sd.u.uFactor, 1 << plan.softBase);
+            this.fullscreen(plan.softLevels[plan.softBase], sd);
+        }
         const dn = this.programs.down;
         gl.useProgram(dn.program);
         gl.uniform1i(dn.u.uSrc, 0);
-        for (let k = 1; k < plan.levels.length; k++) {
-            gl.bindTexture(gl.TEXTURE_2D, plan.levels[k - 1].tex);
-            this.fullscreen(plan.levels[k], dn);
+        const chains = plan.softLevels ? [plan.levels, plan.softLevels] : [plan.levels];
+        for (const chain of chains) {
+            for (let k = 1; k < chain.length; k++) {
+                if (!chain[k - 1]) continue;
+                gl.bindTexture(gl.TEXTURE_2D, chain[k - 1].tex);
+                this.fullscreen(chain[k], dn);
+            }
         }
         this.blur(plan.small, sigmaSmall, fw, fh);
         this.blur(plan.large, sigmaLarge, fw, fh);
@@ -501,19 +749,34 @@ export class OrganicGl {
         // composite
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, cw, ch);
-        const cp = this.programs.composite;
+        const cp = scope ? this.programs.scope : this.programs.composite;
         gl.useProgram(cp.program);
         gl.uniform1i(cp.u.uSmall, 0);
         gl.uniform1i(cp.u.uLarge, 1);
         gl.uniform2f(cp.u.uCanvas, cw, ch);
         gl.uniform1f(cp.u.uDpr, ctx.dpr);
-        gl.uniform1f(cp.u.uRim, org.rimStrength);
-        gl.uniform1f(cp.u.uGradScale, Math.min(1, PC_RMAX_PX / Math.max(rMax * ch / H, 1)));
+        gl.uniform1f(cp.u.uGradScale, gradScale);
+        if (scope) {
+            gl.uniform1i(cp.u.uPaper, 2);
+            gl.uniform1f(cp.u.uReliefScale, rMax * pxPerWorld / (1 << ks) / PC_RMAX_SMALL_TEXELS);
+            gl.uniform1f(cp.u.uStain, org.scopeStain);
+            gl.uniform1f(cp.u.uVignette, org.scopeVignette);
+            gl.uniform1f(cp.u.uSpeck, org.scopeSpeck);
+            gl.activeTexture(gl.TEXTURE2);
+            gl.bindTexture(gl.TEXTURE_2D, plan.paper.tex);
+        } else {
+            gl.uniform1f(cp.u.uRim, org.rimStrength);
+        }
+        gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, plan.small.out.tex);
         gl.activeTexture(gl.TEXTURE1);
         gl.bindTexture(gl.TEXTURE_2D, plan.large.out.tex);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
         gl.bindTexture(gl.TEXTURE_2D, null);
+        if (scope) {
+            gl.activeTexture(gl.TEXTURE2);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+        }
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, null);
 
