@@ -148,7 +148,7 @@ void main() {
   float rim = clamp(halfW + 0.75 - distPx, 0.0, 1.0) * smoothstep(0.002 * uGradScale, 0.005 * uGradScale, gradN) * min(0.6 + 0.3 * uRim, 1.0);
   col = mix(col, vec3(0.96, 1.0, 1.0), rim);
 
-  float d = (m - 0.5) / max(fwidth(m), 0.08 * uGradScale);   // 平らな所で fp16 の量子化が縞にならないよう勾配に下限
+  float d = (m - 0.5) / max(fwidth(m), 1e-4);
   float coreA = clamp(d + 0.5, 0.0, 1.0) * smoothstep(GLASS_EDGE, GLASS_EDGE + 0.06, n);
   float ring = coreA * (1.0 - clamp(d - 1.2 * uDpr + 0.5, 0.0, 1.0));
   vec3 outline = clamp(mix(vec3(luma(Cs)), Cs, 1.25) * 0.62, 0.0, 1.0);
