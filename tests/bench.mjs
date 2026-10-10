@@ -1,15 +1,29 @@
-// CpuSimulation の計測: node tests/bench.mjs [実装のパス (既定 ../src/mobile/cpuSimulation.js)] [--json]
+// CpuSimulation の計測: node tests/bench.mjs [実装のパス | --rev <git rev>] [--json]。最適化前 = --rev a5e3243
 // 一様 (直後) と 500 ステップ後 (クラスタ形成後) を、A = 0.46 / 1.78、N = 2500 / 4000 で。config.js の既定 (圧力あり)
 
-import { pathToFileURL } from 'node:url';
-import { resolve } from 'node:path';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import { resolve, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createParams } from '../src/config.js';
 import { RuleMatrix } from '../src/rules.js';
 
 const args = process.argv.slice(2);
 const json = args.includes('--json');
-const implArg = args.find((a) => !a.startsWith('--'));
-const implUrl = implArg ? pathToFileURL(resolve(implArg)).href : new URL('../src/mobile/cpuSimulation.js', import.meta.url).href;
+const revAt = args.indexOf('--rev');
+const rev = revAt >= 0 ? args[revAt + 1] : null;
+const implArg = args.find((a, i) => !a.startsWith('--') && (revAt < 0 || i !== revAt + 1));
+let implUrl = implArg ? pathToFileURL(resolve(implArg)).href : new URL('../src/mobile/cpuSimulation.js', import.meta.url).href;
+if (rev) {
+    // 指定リビジョンの cpuSimulation.js を一時ファイルへ (相対 import は絶対パスに直す)
+    const root = fileURLToPath(new URL('..', import.meta.url));
+    const src = execFileSync('git', ['-C', root, 'show', `${rev}:src/mobile/cpuSimulation.js`], { encoding: 'utf8' })
+        .replace("'../particles.js'", JSON.stringify(new URL('../src/particles.js', import.meta.url).href));
+    const file = join(tmpdir(), `cpuSimulation-${rev}.mjs`);
+    writeFileSync(file, src);
+    implUrl = pathToFileURL(file).href;
+}
 const { CpuSimulation } = await import(implUrl);
 
 // seed つき乱数 (mulberry32)

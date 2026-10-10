@@ -292,7 +292,7 @@ async function main() {
     let lastNow = 0;
     function autoTune(now) {
         if (lastNow > 0 && params.running) {
-            qSum += now - lastNow;
+            qSum += Math.max(now - lastNow, (sim.stepMs ?? 0) * params.substeps); // Worker 版は rAF が詰まらないので sim の実時間も見る
             qFrames++;
         }
         lastNow = now;
@@ -332,7 +332,7 @@ async function main() {
         renderer.draw(sim, view);
 
         if (stats) {
-            stats.recordCpu(simMs);
+            stats.recordCpu(sim.stepMs ?? simMs);
             const g = sim.grid;
             const cells = g ? `cells     ${g.nx}x${g.ny} (±${g.reach})\n` : '';
             stats.tick(now, sim.count, `${cells}rMax      ${params.rMax.toFixed(4)}`);
