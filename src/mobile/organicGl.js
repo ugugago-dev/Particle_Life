@@ -114,7 +114,7 @@ out vec4 outColor;
 const float GLASS_EDGE = 0.2;
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 float aaStep(float x, float edge) { return clamp((x - edge) / max(fwidth(x) * 1.3, 1e-4) + 0.5, 0.0, 1.0); }
-// 3 次 B スプラインを 4 回のバイリニアで (4〜16 倍に引き伸ばすので、バイリニアだと fwidth がテクセルごとに段になり縁が折れ線・縞になる)
+// 3 次 B スプラインを 4 回のバイリニアで (large は ~16 倍に引き伸ばすので、バイリニアだと fwidth がテクセルごとに段になり膜が折れ線になる)
 vec4 bspline(sampler2D t, vec2 uv) {
   vec2 size = vec2(textureSize(t, 0));
   vec2 p = uv * size - 0.5;
@@ -134,7 +134,7 @@ vec4 bspline(sampler2D t, vec2 uv) {
 }
 void main() {
   vec2 uv = gl_FragCoord.xy / uCanvas;
-  vec4 s = bspline(uSmall, uv);
+  vec4 s = texture(uSmall, uv);
   float n = bspline(uLarge, uv).a;
   vec3 Cs = s.rgb / max(s.a, 1e-4);
   float m = s.a;

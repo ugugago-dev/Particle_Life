@@ -72,6 +72,7 @@ async function main() {
 
     const params = createParams();
     params.renderMode = canOrganic() ? 'organic' : 'dots';
+    params.fieldScale = 0.25;
     params.numParticles = fixedN ? Math.min(Math.round(nQuery), MAX_N) : DEFAULT_N;
     params.substeps = 1;
     params.particleRadius = 1.6;

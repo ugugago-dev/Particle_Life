@@ -347,7 +347,7 @@ export class CpuSimulation {
         c.rMax2 = rMax * rMax;
         c.invRMax = 1 / rMax;
         c.beta = beta;
-        c.invBeta = beta > 0 ? 1 / beta : Infinity;   // beta = 0 で斥力の項を常に 0 に
+        c.invBeta = beta > 0 ? 1 / beta : 0;
         c.invOneMinusBeta = 1 / (1 - beta);
         c.accelScale = rMax * params.forceFactor;
         c.friction = 0.5 ** (dt / Math.max(params.frictionHalfLife, 1e-6));
@@ -410,12 +410,16 @@ export class CpuSimulation {
                             const d = Math.sqrt(d2);
                             const invD = 1 / d;
                             const rr = d * invRMax;
-                            // 分岐なし: r < beta では rep < 0 かつ shape <= 0、r >= beta では rep >= 0 かつ shape >= 0
-                            const rep = Math.min(rr * invBeta - 1, 0);
-                            const shape = Math.max(1 - Math.abs(2 * rr - 1 - beta) * invOneMinusBeta, 0);
-                            const tj = stype[j];
-                            let fi = rep + table[row + tj] * shape;
-                            let fj = rep + table[tj * nt + ti] * shape;
+                            let fi, fj;
+                            if (rr < beta) {
+                                fi = fj = rr * invBeta - 1;
+                            } else {
+                                const t = 2 * rr - 1 - beta;
+                                const shape = 1 - Math.abs(t) * invOneMinusBeta;   // Math.abs は分岐なし (三項演算子だと分岐予測ミスで ~10% 遅い)
+                                const tj = stype[j];
+                                fi = table[row + tj] * shape;
+                                fj = table[tj * nt + ti] * shape;
+                            }
                             if (pressureOn) {
                                 // 圧力と粘性は i, j で同じ値 (粘性の (vj - vi)·(dx, dy) は向きを入れ替えても同じ)
                                 const q = 1 - rr;
