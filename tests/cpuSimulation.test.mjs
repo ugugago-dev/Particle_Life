@@ -4,6 +4,8 @@ import { CpuSimulation } from '../src/mobile/cpuSimulation.js';
 import { createParams } from '../src/config.js';
 import { RuleMatrix } from '../src/rules.js';
 import { wrap } from '../src/particles.js';
+import { createSimHandler } from '../src/mobile/simWorker.js';
+import { SimClient, createSim } from '../src/mobile/simClient.js';
 
 let failures = 0;
 function check(cond, msg) {
@@ -312,6 +314,104 @@ runCase('cellsPerRMax 3', { seed: 23, N, numTypes: 5, width: 0.46, initSpeed: 0.
     for (let i = 0; i < sim.count; i++) inside &&= sim.x[i] >= 0 && sim.x[i] < sim.world.width && sim.y[i] >= 0 && sim.y[i] < 1;
     check(inside, 'setWorld left particles outside');
     console.log('- setWorld wraps');
+}
+
+// 15. Worker のメッセージ処理 (純関数) と SimClient (偽の Worker で structuredClone + transfer を往復) が CpuSimulation とビット一致
+{
+    // 偽の Worker: 実物と同じく postMessage で transfer したバッファは送り側で detached になる。deliver() で 1 通ずつ処理
+    class FakeWorker {
+        constructor() {
+            this.handle = createSimHandler();
+            this.queue = [];
+            this.terminated = false;
+        }
+        postMessage(msg, transfer = []) {
+            this.queue.push(structuredClone(msg, { transfer }));
+        }
+        deliver() {
+            const m = this.queue.shift();
+            const r = this.handle(m);
+            if (r) this.onmessage({ data: structuredClone(r.msg, { transfer: r.transfer }) });
+        }
+        deliverAll() {
+            while (this.queue.length) this.deliver();
+        }
+        terminate() {
+            this.terminated = true;
+        }
+    }
+    const same = (a, b) => a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
+    const intact = (c) => c.x.length === c.count && c.y.length === c.count && c.type.length === c.count
+        && c.x.buffer.byteLength === c.count * 4 && c.type.buffer.byteLength === c.count;
+    const sameState = (c, s) => c.count === s.count && same(c.x, s.x) && same(c.y, s.y) && same(c.type, s.type);
+
+    const fw = new FakeWorker();
+    const client = new SimClient(fw, { maxInFlight: 2 });
+    const direct = new CpuSimulation();
+    const params = Object.assign(createParams(), { rMax: rMaxFor(0.46), viscosity: 0.3 });
+    const pointer = { x: 0.1, y: 0.95, active: true, mode: -1 };
+    const rulesA = new RuleMatrix(5, makeRng(50));
+    let ok = true;
+    const both = (f) => {
+        f(client);
+        f(direct);
+        ok &&= intact(client);
+    };
+    both((s) => s.setWorld(0.46, 1));
+    both((s) => s.setRules(rulesA));
+    both((s) => s.randomize(N, 5, makeRng(51)));
+    ok &&= sameState(client, direct);                       // 送る前から main の x / y / type が正しい
+    both((s) => s.step(params, pointer, 1));
+    ok &&= intact(client);
+    fw.deliverAll();
+    ok &&= intact(client) && sameState(client, direct);
+    check(ok, 'SimClient: state after randomize + step differs from CpuSimulation');
+
+    // 依頼は 2 本まで、3 本目は捨てる (待ち行列にしない)
+    client.step(params, pointer, 1);
+    client.step(params, null, 1);
+    client.step(params, null, 1);
+    check(client.droppedSteps === 1 && client.inFlight === 2, `SimClient: backpressure (dropped ${client.droppedSteps}, inFlight ${client.inFlight})`);
+    direct.step(params, pointer, 1);
+    direct.step(params, null, 1);
+    fw.deliver();
+    ok = intact(client);
+    // 届く前に状態を変える操作: 古い snapshot は捨てる (epoch)
+    both((s) => s.setCount(N + 200, makeRng(52)));
+    fw.deliverAll();
+    ok &&= intact(client) && client.count === N + 200;
+    both((s) => s.step(params, null, 2));
+    fw.deliverAll();
+    ok &&= sameState(client, direct);
+    // 粒子数が同じでも、依頼中に type を振り直したら古い snapshot (古い type) は表示しない
+    both((s) => s.step(params, null, 1));
+    both((s) => s.assignTypes(5, makeRng(53)));
+    fw.deliverAll();
+    check(client.snapshots > 0 && same(client.type, direct.type), 'SimClient: stale snapshot shown after assignTypes');
+    both((s) => s.setWorld(0.5, 1));
+    both((s) => s.setRules(new RuleMatrix(5, makeRng(54))));
+    both((s) => s.step(params, pointer, 1));
+    fw.deliverAll();
+    ok &&= intact(client) && sameState(client, direct);
+    both((s) => s.setCount(N - 300, makeRng(55)));
+    ok &&= intact(client) && sameState(client, direct);    // 減らすときも main 側で即座に正しい
+    both((s) => s.step(params, null, 3));
+    fw.deliverAll();
+    ok &&= sameState(client, direct) && client.grid.nx === direct.grid.nx && client.grid.reach === direct.grid.reach;
+    check(ok, 'SimClient: state after setCount / assignTypes / setWorld differs from CpuSimulation');
+    check(client.pool.length <= 3, `SimClient: pool grew to ${client.pool.length}`);
+
+    // Worker が落ちたら手元の状態から CpuSimulation に切り替わり、そのまま動く
+    client.step(params, null, 1);
+    client.worker.onerror({ message: 'test' });
+    const before = Float32Array.from(client.x);
+    client.step(params, null, 1);
+    check(!client.isWorker && fw.terminated && client.count === N - 300 && !same(before, client.x) && client.x.every(Number.isFinite),
+        'SimClient: fallback after a worker error');
+
+    // Node には Worker が無いので createSim は CpuSimulation を返す
+    check(createSim() instanceof CpuSimulation, 'createSim: no fallback to CpuSimulation without Worker');
+    console.log(`- SimClient / simWorker handler: bit-identical to CpuSimulation, dropped ${client.droppedSteps}, fallback ok`);
 }
 
 // 性能の目安 (合否には使わない): N = 4000、rMax = sqrt(30 A / N)、config.js の既定 (圧力あり)

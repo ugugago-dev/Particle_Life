@@ -415,7 +415,7 @@ export class CpuSimulation {
                                 fi = fj = rr * invBeta - 1;
                             } else {
                                 const t = 2 * rr - 1 - beta;
-                                const shape = 1 - (t < 0 ? -t : t) * invOneMinusBeta;
+                                const shape = 1 - Math.abs(t) * invOneMinusBeta;   // Math.abs は分岐なし (三項演算子だと分岐予測ミスで ~10% 遅い)
                                 const tj = stype[j];
                                 fi = table[row + tj] * shape;
                                 fj = table[tj * nt + ti] * shape;

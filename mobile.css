@@ -1,63 +1,634 @@
 /* ---- mobile-only layout (loaded after style.css) ---- */
 
+:root {
+    --sa-t: env(safe-area-inset-top, 0px);
+    --sa-r: env(safe-area-inset-right, 0px);
+    --sa-b: env(safe-area-inset-bottom, 0px);
+    --sa-l: env(safe-area-inset-left, 0px);
+    --surface: rgba(8, 20, 40, 0.82);
+    --surface-solid: #0b1a30;
+    --line: rgba(160, 200, 255, 0.18);
+    --chip: rgba(255, 255, 255, 0.07);
+    --accent: #8fc2ff;
+    --text-sub: rgba(207, 227, 255, 0.72); /* AA: 暗い背景上 4.5:1 以上 */
+    --pull: 80, 255, 140;
+    --push: 255, 90, 80;
+    --radius: 12px;
+    --font: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+    --cell: 32px;
+}
+
 html,
 body {
     overscroll-behavior: none;
     -webkit-tap-highlight-color: transparent;
+    font-family: var(--font);
 }
 
-/* bottom toolbar: thumb reach, above the home indicator */
+button,
+input {
+    font-family: inherit;
+    touch-action: manipulation;
+}
+
+button:focus-visible,
+input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* ---- toolbar: 画面下の浮かぶパネル。親指の届く位置 ---- */
 #toolbar {
     position: fixed;
+    z-index: 5;
+    left: 50%;
+    bottom: calc(10px + var(--sa-b));
+    transform: translateX(-50%);
+    box-sizing: border-box;
+    width: min(420px, calc(100vw - 16px - var(--sa-l) - var(--sa-r)));
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+    padding: 6px;
+    border-radius: var(--radius);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    user-select: none;
+    -webkit-user-select: none;
+    transition: opacity 0.4s ease, transform 0.4s ease;
+}
+
+#toolbar button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    min-width: 44px;
+    min-height: 56px;
+    padding: 4px 2px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+}
+
+#toolbar button:active {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.tb-label {
+    font-size: 11px;
+    line-height: 1;
+    color: var(--text-sub);
+}
+
+.icon {
+    display: inline-flex;
+}
+
+#toolbar button.active,
+#toolbar button[aria-pressed="true"]:not(.tb-mode) {
+    background: rgba(143, 194, 255, 0.16);
+    border-color: rgba(143, 194, 255, 0.4);
+}
+
+/* 引く / 押す: ポインタ円と同じ緑 / 赤 */
+#toolbar .tb-mode {
+    color: rgb(var(--pull));
+    background: rgba(var(--pull), 0.1);
+    border-color: rgba(var(--pull), 0.4);
+}
+
+#toolbar .tb-mode .tb-label {
+    color: rgb(var(--pull));
+    font-weight: 600;
+}
+
+#toolbar .tb-mode.push {
+    color: rgb(var(--push));
+    background: rgba(var(--push), 0.1);
+    border-color: rgba(var(--push), 0.45);
+}
+
+#toolbar .tb-mode.push .tb-label {
+    color: rgb(var(--push));
+}
+
+/* シート表示中はツールバーを退ける (横長ではシートと重なるため) */
+body.sheet-open #toolbar {
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* 没入モード */
+body.immersive #toolbar {
+    opacity: 0;
+    transform: translate(-50%, 12px);
+    pointer-events: none;
+}
+
+.stats {
+    transition: opacity 0.4s ease;
+}
+
+body.immersive .stats {
+    opacity: 0;
+}
+
+/* 下端のタップで戻る。隠れている間だけ出る透明な帯 + 小さなつまみ */
+#edge-reveal {
+    position: fixed;
+    z-index: 4;
     left: 0;
     right: 0;
     bottom: 0;
-    z-index: 5;
+    height: calc(40px + var(--sa-b));
+    padding: 0;
+    border: 0;
+    background: transparent;
     display: flex;
-    flex-wrap: wrap;
+    align-items: flex-end;
     justify-content: center;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
-    background: var(--panel);
-    border-top: 1px solid var(--panel-border);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
+}
+
+#edge-reveal[hidden] {
+    display: none;
+}
+
+#edge-reveal span {
+    width: 44px;
+    height: 4px;
+    margin-bottom: calc(8px + var(--sa-b));
+    border-radius: 2px;
+    background: rgba(207, 227, 255, 0.35);
+}
+
+/* ---- sheet ---- */
+.sheet-root[hidden] {
+    display: none;
+}
+
+.sheet-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: rgba(0, 0, 0, 0.32);
+    opacity: 0;
+    transition: opacity 0.25s ease;
+}
+
+.sheet-root.open .sheet-backdrop {
+    opacity: 1;
+}
+
+.sheet {
+    position: fixed;
+    z-index: 21;
+    left: 50%;
+    bottom: 0;
+    box-sizing: border-box;
+    width: min(640px, 100vw);
+    max-height: 60vh;
+    max-height: 60dvh;
+    display: flex;
+    flex-direction: column;
+    padding-left: var(--sa-l);
+    padding-right: var(--sa-r);
+    border-radius: var(--radius) var(--radius) 0 0;
+    background: var(--surface-solid);
+    border: 1px solid var(--line);
+    border-bottom: 0;
+    color: var(--text);
+    font: 14px/1.45 var(--font);
+    transform: translate(-50%, 100%);
+    transition: transform 0.26s cubic-bezier(0.2, 0.8, 0.2, 1);
+    outline: none;
     user-select: none;
     -webkit-user-select: none;
 }
 
-#toolbar button,
-#toolbar select {
+@supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+    .sheet {
+        background: rgba(9, 21, 42, 0.9);
+        -webkit-backdrop-filter: blur(14px);
+        backdrop-filter: blur(14px);
+    }
+}
+
+.sheet-root.open .sheet {
+    transform: translate(-50%, 0);
+}
+
+.sheet.dragging {
+    transition: none;
+}
+
+.sheet-header {
+    position: relative;
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 52px;
+    padding: 14px 8px 0 16px;
+    touch-action: none;
+    cursor: grab;
+}
+
+.sheet-grip {
+    position: absolute;
+    top: 7px;
+    left: 50%;
+    width: 40px;
+    height: 4px;
+    margin-left: -20px;
+    border-radius: 2px;
+    background: rgba(207, 227, 255, 0.35);
+}
+
+.sheet-header h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.sheet-close {
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+}
+
+.sheet-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 4px 16px 12px;
+    -webkit-overflow-scrolling: touch;
+}
+
+.sheet-footer {
+    flex: none;
+    display: flex;
+    gap: 8px;
+    padding: 8px 16px calc(10px + var(--sa-b));
+    border-top: 1px solid var(--line);
+}
+
+.sheet-footer[hidden] {
+    display: none;
+}
+
+.btn {
+    flex: 1 1 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 44px;
+    padding: 0 8px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--chip);
+    color: var(--text);
+    font-size: 14px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.btn:active {
+    background: rgba(255, 255, 255, 0.16);
+}
+
+/* 横長 (スマホを横向き): 右端のサイドパネル */
+@media (orientation: landscape) and (max-height: 520px) {
+    .sheet {
+        left: auto;
+        right: 0;
+        top: 0;
+        bottom: 0;
+        width: min(400px, 56vw);
+        max-height: none;
+        padding-left: 0;
+        padding-right: var(--sa-r);
+        border-radius: var(--radius) 0 0 var(--radius);
+        border: 1px solid var(--line);
+        border-right: 0;
+        transform: translateX(100%);
+    }
+
+    .sheet-root.open .sheet {
+        transform: translateX(0);
+    }
+
+    /* 高さが足りないので、パネル全体をスクロールさせる (ヘッダは固定) */
+    .sheet {
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+
+    .sheet-header {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        padding-top: 4px;
+        padding-top: calc(4px + var(--sa-t));
+        background: var(--surface-solid);
+    }
+
+    .sheet-body {
+        flex: none;
+        overflow: visible;
+    }
+
+    .sheet-grip {
+        top: 50%;
+        left: 6px;
+        width: 4px;
+        height: 40px;
+        margin: -20px 0 0;
+    }
+
+    .sheet-footer {
+        padding-bottom: calc(8px + var(--sa-b));
+    }
+
+    #toolbar {
+        width: min(360px, calc(100vw - 16px - var(--sa-l) - var(--sa-r)));
+    }
+
+    #toolbar button {
+        min-height: 48px;
+    }
+}
+
+/* ---- rules sheet ---- */
+.chips {
+    display: flex;
+    gap: 8px;
+    margin: 0 -16px 4px;
+    padding: 4px 16px 8px;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+}
+
+.chips::-webkit-scrollbar {
+    display: none;
+}
+
+.chip {
+    flex: none;
     min-width: 44px;
     min-height: 44px;
-    padding: 0 10px;
-    border-radius: 8px;
-    border: 1px solid var(--panel-border);
-    background: rgba(255, 255, 255, 0.06);
+    padding: 0 14px;
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    background: var(--chip);
     color: var(--text);
-    font: 14px/1 system-ui, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
-    touch-action: manipulation;
+    font-size: 14px;
+    scroll-snap-align: center;
+    cursor: pointer;
 }
 
-#toolbar select {
-    max-width: 100%;
+.chip[aria-pressed="true"] {
+    background: rgba(143, 194, 255, 0.25);
+    border-color: rgba(143, 194, 255, 0.65);
+    color: #fff;
+    font-weight: 600;
 }
 
-#toolbar button[aria-pressed="true"] {
-    background: rgba(160, 200, 255, 0.22);
-    border-color: rgba(160, 200, 255, 0.5);
+.hint {
+    margin: 0 0 8px;
+    min-height: 1.45em;
+    font-size: 13px;
+    color: var(--text-sub);
 }
 
-/* matrix panel sits above the toolbar; --toolbar-h is set by main.js (default: two rows) */
-:root {
-    --toolbar-h: 110px;
+.matrix-host {
+    overflow-x: auto;
+    padding-bottom: 2px;
 }
 
-.matrix-panel {
-    bottom: calc(var(--toolbar-h) + 8px);
-    left: 8px;
-    right: auto;
-    max-width: calc(100vw - 16px);
-    overflow: auto;
+.matrix-host .matrix-panel {
+    position: static;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    max-width: none;
+    overflow: visible;
+}
+
+.matrix-host .matrix-caption,
+.matrix-host .matrix-help {
+    display: none;
+}
+
+.matrix-host .matrix-grid {
+    gap: 2px;
+    margin: 0 auto;
+}
+
+.matrix-host .matrix-dot {
+    width: 12px;
+    height: 12px;
+}
+
+.matrix-host .matrix-cell {
+    border-radius: 4px;
+}
+
+/* ---- settings sheet ---- */
+.group {
+    margin: 0 0 14px;
+}
+
+.group h3 {
+    margin: 8px 0 4px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--text-sub);
+}
+
+.row {
+    padding: 6px 0;
+}
+
+.row-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 14px;
+}
+
+.row-label small {
+    display: block;
+    font-size: 12px;
+    color: var(--text-sub);
+}
+
+.row-value {
+    font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--text-sub);
+}
+
+.row-switch {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 44px;
+}
+
+input[type="range"] {
+    display: block;
+    width: 100%;
+    height: 44px;
+    margin: 0;
+    background: transparent;
+    accent-color: var(--accent);
+}
+
+.switch {
+    position: relative;
+    flex: none;
+    width: 52px;
+    height: 44px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+.switch::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 10px;
+    width: 52px;
+    height: 24px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.18);
+    border: 1px solid var(--line);
+    box-sizing: border-box;
+    transition: background 0.2s;
+}
+
+.switch span {
+    position: absolute;
+    top: 13px;
+    left: 3px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #e8f1ff;
+    transition: transform 0.2s;
+}
+
+.switch[aria-checked="true"]::before {
+    background: #2f7fd6;
+    border-color: transparent;
+}
+
+.switch[aria-checked="true"] span {
+    transform: translateX(28px);
+}
+
+.segmented {
+    display: flex;
+    margin-top: 4px;
+    padding: 3px;
+    gap: 3px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.07);
+}
+
+.segmented button {
+    flex: 1;
+    min-height: 40px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text);
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.segmented button[aria-checked="true"] {
+    background: rgba(143, 194, 255, 0.3);
+    color: #fff;
+    font-weight: 600;
+}
+
+.segmented button:disabled {
+    color: rgba(207, 227, 255, 0.5);
+    cursor: not-allowed;
+}
+
+/* ---- toast ---- */
+.toast {
+    position: fixed;
+    z-index: 30;
+    left: 50%;
+    bottom: calc(96px + var(--sa-b));
+    max-width: calc(100vw - 32px);
+    padding: 10px 16px;
+    border-radius: var(--radius);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    color: var(--text);
+    font: 14px/1.4 var(--font);
+    pointer-events: none;
+    opacity: 0;
+    transform: translate(-50%, 8px);
+    transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.toast.show {
+    opacity: 1;
+    transform: translate(-50%, 0);
+}
+
+/* lil-gui (?advanced) はシートより下 */
+.lil-gui.root {
+    z-index: 3;
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+    #toolbar,
+    .stats,
+    .sheet,
+    .sheet-backdrop,
+    .toast,
+    .switch::before,
+    .switch span {
+        transition: none;
+    }
+
+    .matrix-cell.pressing {
+        animation: none;
+    }
+}
+
+.stats {
+    top: calc(8px + var(--sa-t));
+    left: calc(8px + var(--sa-l));
 }
