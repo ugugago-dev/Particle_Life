@@ -86,7 +86,11 @@ export function showUnsupported(reason, kind = 'unsupported') {
     const detail = document.createElement('div');
     detail.className = 'unsupported-detail';
     detail.textContent = reason;
-    el.append(title, hint, detail);
+    const link = document.createElement('a');
+    link.className = 'unsupported-link';
+    link.href = 'mobile.html';
+    link.textContent = 'スマホ版 (WebGL2) を開く';
+    el.append(title, hint, link, detail);
     document.body.append(el);
     console.error('[WebGPU]', reason);
 }

@@ -1,0 +1,63 @@
+/* ---- mobile-only layout (loaded after style.css) ---- */
+
+html,
+body {
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* bottom toolbar: thumb reach, above the home indicator */
+#toolbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 5;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    background: var(--panel);
+    border-top: 1px solid var(--panel-border);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+#toolbar button,
+#toolbar select {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0 10px;
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text);
+    font: 14px/1 system-ui, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+    touch-action: manipulation;
+}
+
+#toolbar select {
+    max-width: 100%;
+}
+
+#toolbar button[aria-pressed="true"] {
+    background: rgba(160, 200, 255, 0.22);
+    border-color: rgba(160, 200, 255, 0.5);
+}
+
+/* matrix panel sits above the toolbar; --toolbar-h is set by main.js (default: two rows) */
+:root {
+    --toolbar-h: 110px;
+}
+
+.matrix-panel {
+    bottom: calc(var(--toolbar-h) + 8px);
+    left: 8px;
+    right: auto;
+    max-width: calc(100vw - 16px);
+    overflow: auto;
+}
