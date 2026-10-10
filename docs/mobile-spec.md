@@ -220,3 +220,7 @@ PC 版の organic (`docs/organic-rendering-spec.md`) は WebGPU の MRT・rgba16
 - **sim の生成**: `createSim()` (`src/mobile/simClient.js`、別担当が並行して作る) を呼ぶ。それが無い間は `CpuSimulation` を直接使い、import は 1 か所にまとめる。
 
 検証 (UI 担当): 390x844 / 844x390 / 360x640 / 768x1024 のスクリーンショットを撮り、シート開閉・ツールバー自動隠れ・ルール編集 (タップ / 長押し)・プリセット切替・設定変更が動き、コンソールエラー 0。見た目は自分で画像を見て崩れを直す。
+
+## organic のスタイル (決定: scope が既定)
+
+スマホ版の organic は **scope** を既定にする (`params.organicStyle = 'scope'`)。glass は実装済みなので `view.organic.organicStyle === 'glass'` のとき従来どおり描く (UI には出さない)。scope の仕様は `docs/organic-rendering-spec.md` の「scope」節 (`softLarge`、`thresholdScale = 1.6`、`fine = {splat 0.4, small 0.4, large 1}`、`paper`、`scopeStain` / `scopeVignette` / `scopeSpeck`) と `src/gpu/shaders/organic.wgsl.js` の scope 部分。
