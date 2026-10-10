@@ -164,7 +164,13 @@ PC 版の `src/main.js` と同じ構成 (`params` / `RuleMatrix` / `palette` / `
 - `?advanced` のとき `stats.js` のオーバーレイ (`StatsOverlay`) を使う場合は `new StatsOverlay(false)`、`recordGpu` は呼ばない。`sim` 時間 (`performance.now()` 差) を `recordCpu` に渡し、`grid` の情報を `tick` の第 3 引数に。
 - ポインタの座標は `input.js` の `world` 単位 (高さ = 1) でそのまま `sim.step` に渡る。
 
-## phase 2: organic (WebGL2 の簡易版)。phase 1 の完了・計測のあとに着手
+## 振り分け (決定)
+
+スマホ / タブレット (UA が Android / iPhone / iPad / iPod、または iPadOS の Macintosh + タッチ) は WebGPU が使える端末でも**常に `mobile.html`**。`index.html` の先頭の inline script が `location.replace('mobile.html' + location.search)` する。`?desktop` を付けると PC 版を強制。
+
+## phase 2: organic (WebGL2 の簡易版)。実装する (担当 Opus: `src/mobile/organicGl.js`。`glRenderer.js` はそれを呼ぶ薄い分岐だけ足す)
+
+- `view.renderMode === 'organic'` かつ `capabilities` が満たされるとき `organicGl` で描く。満たされなければ dots。`mobile/main.js` は能力があれば既定を `organic`、ツールバーに `点 / 有機` のトグルを持つ (担当: 統括)。
 
 PC 版の organic (`docs/organic-rendering-spec.md`) は WebGPU の MRT・rgba16float・分離ガウスの多段パス。スマホ版は同じ見た目 (特に既定の `glass`) を、次の簡略で作る。
 
