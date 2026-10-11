@@ -226,3 +226,5 @@ PC 版の organic (`docs/organic-rendering-spec.md`) は WebGPU の MRT・rgba16
 スマホ版の organic は **scope** を既定にする (`params.organicStyle = 'scope'`)。glass は実装済みなので `view.organic.organicStyle === 'glass'` のとき従来どおり描く (UI には出さない)。scope の仕様は `docs/organic-rendering-spec.md` の「scope」節 (`softLarge`、`thresholdScale = 1.6`、`fine = {splat 0.4, small 0.4, large 1}`、`paper`、`scopeStain` / `scopeVignette` / `scopeSpeck`) と `src/gpu/shaders/organic.wgsl.js` の scope 部分。
 
 scope の種類の描き分け (`docs/scope-species-spec.md` フェーズ 1) は `organicGl.js` にも入れてある。field (rg = cosθ, sinθ の加算、b = 0) は rgba16f の負値を保つ (3 次 B スプラインの重みは非負なのでリンギングは出ない)。染色の透過率は `stainColor.js` の `buildStainTables` をパレットが変わったときだけ作り、`uTransmit[16]` と `uNumTypes` で composite へ渡す (GLSL の OKLab は削除)。式・定数は PC の `decodeSpecies` / `scopeStyle` と同じ。
+
+scope の密度による染色 (`docs/scope-species-spec.md` フェーズ 2 の実装メモ) も入れてある。`SHAPE_OCC_FS` が small の b に `1 - exp(-max(v, 0) / 12)` を書き (`SOFT_DOWN_FS` は 0 のまま)、composite は `rho = s.b` で染色の指数に `min(0.6 + 1.4 rho, 1)` を掛け、濃くする分と核の帯は `luma(T)` の累乗で暗くする (色相を保つ)。旧核小体は廃止。式・定数は PC と同じ。

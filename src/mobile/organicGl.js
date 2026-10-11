@@ -78,7 +78,7 @@ void main() {
 `;
 
 // occupancy 整形 (scope の small): 1 - exp(-2 max(v - threshold, 0))。threshold は thresholdScale 倍済み。
-// 出力 = (e x c, 0, c)、e = f.rg / f.a (種類の角度の平均ベクトル。b は将来の密度用に 0)
+// 出力 = (e x c, rho, c)、e = f.rg / f.a (種類の角度の平均ベクトル)、rho = 1 - exp(-max(v, 0) / 12) (圧縮した生密度。c を掛けない。composite の密度で染色の濃さを変える)
 const SHAPE_OCC_FS = `#version 300 es
 precision highp float;
 uniform sampler2D uSrc;
@@ -89,7 +89,8 @@ void main() {
   vec4 f = texelFetch(uSrc, ivec2(gl_FragCoord.xy), 0);
   float v = max(f.a * uGain, 0.0);
   float c = 1.0 - exp(-2.0 * max(v - uThreshold, 0.0));
-  outColor = vec4(f.rg / max(f.a, 1e-4) * c, 0.0, c);
+  float rho = 1.0 - exp(-max(v, 0.0) / 12.0);
+  outColor = vec4(f.rg / max(f.a, 1e-4) * c, rho, c);
 }
 `;
 
@@ -274,6 +275,14 @@ const float SCOPE_MIX_LIGHT = 0.5;
 const float SCOPE_MIX_COVER = 0.0;
 const float SCOPE_SEP_W = 0.4;
 const float SCOPE_SEP_ALPHA = 0.5;
+// 密度 (rho = small の b。PC の SCOPE_DENS_* / SCOPE_DEEP / SCOPE_CORE* と同じ値)
+const float SCOPE_DENS_BASE = 0.6;
+const float SCOPE_DENS_GAIN = 1.4;
+const float SCOPE_DEEP = 0.35;
+const float SCOPE_CORE = 0.6;
+const vec2 SCOPE_CORE_RHO = vec2(0.55, 0.8);
+const vec2 SCOPE_CORE_N = vec2(0.3, 0.5);
+const float SCOPE_CORE_SAT = 0.1;
 ${BSPLINE_GLSL}
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 // 種類の角度の平均ベクトル e (|e| = 純度) から種類を復元する (organic.wgsl.js の decodeSpecies)。
@@ -361,12 +370,20 @@ void main() {
     vec3 nrm = normalize(vec3(-g * SCOPE_SLOPE, 1.0));
     float spec = pow(clamp(dot(nrm, normalize(vec3(SCOPE_LIGHT * 0.5, 1.0))), 0.0, 1.0), 48.0);
     float thick = mix(0.7, 1.0, smoothstep(0.15, 0.85, l.a));
-    vec3 body = col * pow(T, vec3(k * m * thick * (1.0 + 1.2 * (noise.r - 0.5) + (noise.b - 0.5))));
+    // 密度 rho: 薄い所は淡く (指数 x min(dens, 1))。濃くする分と核の帯は luma(T) のスカラー累乗 (色相を保つ)
+    float rho = s.b;
+    float dens = SCOPE_DENS_BASE + SCOPE_DENS_GAIN * rho;
+    float big = smoothstep(SCOPE_CORE_N.x, SCOPE_CORE_N.y, l.a);
+    float core = smoothstep(SCOPE_CORE_RHO.x, SCOPE_CORE_RHO.y, rho) * big;
+    float deep = SCOPE_DEEP * max(dens - 1.0, 0.0) * big;
+    float lt = luma(T);
+    vec3 body = col * pow(T, vec3(k * m * thick * (1.0 + 1.2 * (noise.r - 0.5) + (noise.b - 0.5)) * min(dens, 1.0)));
+    body *= pow(lt, k * (deep + SCOPE_CORE * core));
+    body = max(mix(vec3(luma(body)), body, 1.0 + SCOPE_CORE_SAT * core), vec3(0.0));
     body *= 1.0 + SCOPE_RELIEF * clamp(tilt, -1.0, 1.0);
-    body *= 1.0 - 0.2 * smoothstep(0.85, 1.0, l.a);
     body += SCOPE_SPEC * spec;
     float ring = cover * (1.0 - clamp(d - 1.3 * w + 0.5, 0.0, 1.0)) * edgeFade;
-    vec3 outline = col * pow(T, vec3(k * 2.2)) * 0.6;
+    vec3 outline = col * pow(T, vec3(k * 2.2)) * 0.6 * pow(lt, k * deep);
     // 種類の区切り線: 接する別種の小器官を別の物に見せる (色 = 両側の輪郭の色の平均を暗く)
     vec3 sepCol = col * 0.5 * (pow(T0, vec3(k * 2.2)) + pow(T1, vec3(k * 2.2))) * 0.5;
     float sep = SCOPE_SEP_ALPHA * cover * sp.keep * (sp.i0 != sp.i1 ? 1.0 : 0.0) * clamp(SCOPE_SEP_W * w + 0.5 - abs(dsw), 0.0, 1.0);
