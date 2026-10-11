@@ -51,6 +51,7 @@ export const defaults = Object.freeze({
     scopeStain: 1.5,         // scope: stain strength (absorbance of a fully dense body)
     scopeVignette: 0.6,      // scope: eyepiece vignette (0 = flat illumination)
     scopeSpeck: 1,           // scope: bodies need this much cell around them to show (0 = show every body, 1 = only inside a cell wall)
+    scopeIsolation: 0.85,    // scope: other-type particles near a pure cell do not push its wall and show as separate dots (0 = off)
     showParticles: false,    // faint dots on top of the organic look
 });
 

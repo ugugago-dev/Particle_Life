@@ -11,6 +11,7 @@ import {
     splatWGSL, shapeWGSL, downsampleWGSL, blurWGSL, compositeWGSL, paperWGSL,
 } from './shaders/organic.wgsl.js';
 import { ORGANIC_STYLES, SHAPE_INDEX } from '../organicStyles.js';
+import { buildStainTables, MAX_STAIN_TYPES } from '../stainColor.js';
 
 const BG = { r: 1 / 255, g: 14 / 255, b: 29 / 255, a: 1 };   // style.css の --bg
 const TRAIL_FORMAT = 'rgba16float';  // 8bit だとフェードの丸めで残像が消えきらない
@@ -24,7 +25,7 @@ const MAX_BLUR_LEVEL = 6;
 
 const OF = Object.fromEntries(ORGANIC_FIELDS.map((name, i) => [name, i]));
 // config.js から同名でコピーする項目 (残りは writeOrganicUniform で計算)
-const COPIED_PARAMS = ['fieldGain', 'threshold', 'nucleusThreshold', 'speciesTint', 'rimStrength', 'coreThreshold', 'scopeStain', 'scopeVignette', 'scopeSpeck'];
+const COPIED_PARAMS = ['fieldGain', 'threshold', 'nucleusThreshold', 'speciesTint', 'rimStrength', 'coreThreshold', 'scopeStain', 'scopeVignette', 'scopeSpeck', 'scopeIsolation'];
 
 const ALPHA_BLEND = {
     color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
@@ -100,6 +101,12 @@ export class GpuRenderer {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
         this.paletteSource = null;
+        // scope の種類ごとの染色 (WGSL の StainTables = stain[16] + transmit[16])
+        this.stainBuffer = device.createBuffer({
+            label: 'scope stain tables',
+            size: 2 * MAX_STAIN_TYPES * 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
 
         this.trailTexture = null;
         this.trailView = null;
@@ -313,20 +320,14 @@ export class GpuRenderer {
         }) : null;
 
         const shapePipeline = granules ? pipelines.shapeGranule : softLarge ? pipelines.shapeSoft : pipelines.shape;
-        const passes = [{    // 実行順の全画面パス
+        const shapePass = {
             label: 'organic shape',
             pipeline: shapePipeline,
             target: levels[0].view,
             extraTarget: granule?.view ?? (softLarge ? levelsL[0].view : undefined),
-            group: device.createBindGroup({
-                layout: shapePipeline.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: { buffer: this.organicBuffer } },
-                    { binding: 1, resource: field.view },
-                    ...(granules ? [{ binding: 2, resource: granuleRaw.view }] : []),
-                ],
-            }),
-        }];
+            group: null,    // softLarge は large ぼかしの出力 (前フレームの値) も読むので、それを作ったあとで
+        };
+        const passes = [shapePass];    // 実行順の全画面パス
         for (const chain of softLarge ? [levels, levelsL] : [levels]) {
             for (let k = 1; k < chain.length; k++) {
                 passes.push({
@@ -368,6 +369,17 @@ export class GpuRenderer {
         };
         const small = blurPair('small', levels[ks]);
         const large = kl >= 0 ? blurPair('large', levelsL[kl]) : small;    // 使わないスタイルでは読まれない
+        // softLarge (scope) の shape は前フレームの large ぼかしを読む (異種の分離)。このフレームではあとのパスで書かれるので
+        // 同じパスで読み書きはしない。作り直した直後は 0 (減衰なし)
+        shapePass.group = device.createBindGroup({
+            layout: shapePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.organicBuffer } },
+                { binding: 1, resource: field.view },
+                ...(granules ? [{ binding: 2, resource: granuleRaw.view }] : []),
+                ...(softLarge ? [{ binding: 3, resource: large.view }, { binding: 4, resource: this.fieldSampler }] : []),
+            ],
+        });
 
         const compositeGroup = device.createBindGroup({
             layout: pipelines.composite.getBindGroupLayout(0),
@@ -379,6 +391,7 @@ export class GpuRenderer {
                 { binding: 4, resource: large.view },
                 { binding: 5, resource: (granule ?? small).view },    // cell 以外では読まれない
                 { binding: 6, resource: (paperTex ?? small).view },
+                { binding: 7, resource: { buffer: this.stainBuffer } },    // scope だけ
             ],
         });
 
@@ -439,6 +452,9 @@ export class GpuRenderer {
             data[4 * t + 3] = 1;
         }
         this.device.queue.writeBuffer(this.paletteBuffer, 0, data);
+        const { stain, transmit } = buildStainTables(palette.rgb, palette.numTypes);
+        this.device.queue.writeBuffer(this.stainBuffer, 0, stain);
+        this.device.queue.writeBuffer(this.stainBuffer, stain.byteLength, transmit);
     }
 
     updateParticleGroup(sim) {
@@ -561,7 +577,7 @@ export class GpuRenderer {
         const count = sim.count;
         const layout = this.updateOrganicLayout(org, style, view.rMax, sim.world.height);
         const plan = this.ensureOrganicPlan(layout, style);
-        this.writeOrganicUniform(org, style, view.rMax, sim, layout);
+        this.writeOrganicUniform(org, style, view.rMax, sim, layout, view.palette);
         this.writeBlurUniforms(plan, layout);
         this.updateSplatGroup(sim);
 
@@ -613,7 +629,7 @@ export class GpuRenderer {
         pass.end();
     }
 
-    writeOrganicUniform(org, style, rMax, sim, layout) {
+    writeOrganicUniform(org, style, rMax, sim, layout, palette) {
         const f = this.organicData;
         const u = this.organicU32;
         const world = sim.world;
@@ -628,6 +644,7 @@ export class GpuRenderer {
         f[OF.fieldW] = layout.fw;
         f[OF.fieldH] = layout.fh;
         f[OF.margin] = layout.margin;
+        f[OF.numTypes] = Math.min(Math.max(palette.numTypes, 1), MAX_STAIN_TYPES);
         for (const name of COPIED_PARAMS) f[OF[name]] = org[name];
         f[OF.threshold] *= style.thresholdScale ?? 1;
 

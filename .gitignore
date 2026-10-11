@@ -1,1 +1,3 @@
 legacy/
+tests/render/out/
+node_modules/

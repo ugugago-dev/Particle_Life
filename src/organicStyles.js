@@ -15,7 +15,7 @@ export const ORGANIC_STYLES = {
     },
     scope: {
         index: 2, fine: { splat: 0.4, small: 0.4, large: 1 }, shape: 'occupancy', granules: false, paper: true,
-        params: ['threshold', 'blurLarge', 'scopeStain', 'scopeVignette', 'scopeSpeck'],
+        params: ['threshold', 'blurLarge', 'scopeStain', 'scopeVignette', 'scopeSpeck', 'scopeIsolation'],
         thresholdScale: 1.6, softLarge: true,
     },
 };
