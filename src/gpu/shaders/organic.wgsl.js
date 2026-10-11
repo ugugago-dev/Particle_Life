@@ -180,6 +180,9 @@ const OCC_SHARP = 2.0;
 const NUCLEUS_S = 3.5;
 const NUCLEUS_P = 1.8;
 
+// scope の small 用 b = 1 - exp(-(v / S)^P) (P = 1)。殻 v 2〜5 -> 0.15〜0.34、大細胞 v 10 -> 0.56、300 粒以上の塊 v 30 -> 0.92
+const SCOPE_DENS_S = 12.0;
+
 fn compress(v: f32, s: f32, p: f32) -> f32 {
   return 1.0 - exp(-pow(v / s, p));
 }
@@ -197,7 +200,9 @@ fn shapeField(f: vec4f) -> vec4f {
     case SHAPE_NUCLEUS: { c = smoothstep(O.coreThreshold - 0.1, O.coreThreshold + 0.1, compress(v, NUCLEUS_S, NUCLEUS_P)); }
     case SHAPE_OCCUPANCY, default: { c = 1.0 - exp(-OCC_SHARP * max(v - O.threshold, 0.0)); }
   }
-  return shaped(f, c);
+  var out = shaped(f, c);
+  if (O.style == STYLE_SCOPE) { out.b = 1.0 - exp(-max(v, 0.0) / SCOPE_DENS_S); }    // 圧縮した生密度 (c を掛けない。composite の ρ)
+  return out;
 }
 
 @fragment
@@ -316,7 +321,7 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
 export const compositeWGSL = ORGANIC_COMMON + FULLSCREEN_VS + /* wgsl */`
 @group(0) @binding(1) var<uniform> O: OrganicParams;
 @group(0) @binding(2) var samp: sampler;
-@group(0) @binding(3) var smallBlur: texture_2d<f32>;     // disk (rgb = 色 x c、scope は rg = 種類の角度の平均ベクトル x c、a = c)
+@group(0) @binding(3) var smallBlur: texture_2d<f32>;     // disk (rgb = 色 x c、scope は rg = 種類の角度の平均ベクトル x c、b = 圧縮した生密度 ρ、a = c)
 @group(0) @binding(4) var largeBlur: texture_2d<f32>;     // ring
 @group(0) @binding(5) var granuleTex: texture_2d<f32>;    // cell だけ
 @group(0) @binding(6) var paperTex: texture_2d<f32>;      // cell / scope だけ
@@ -437,6 +442,14 @@ const SCOPE_MIX_LIGHT = 0.5;               // 細胞質: 混合域の灰色を�
 const SCOPE_MIX_COVER = 0.0;               // 小器官: 純度が低い所 (keep = 0) の不透明度 (隙間をぼかしが埋めた所を隙間に見せる)
 const SCOPE_SEP_W = 0.4;                   // 種類の区切り線の半幅 (dpr px)
 const SCOPE_SEP_ALPHA = 0.5;
+// 密度 (ρ = small の b)。色ごとの染色の指数 x min(BASE + GAIN ρ, 1)、1 を超えた分 x DEEP と核の帯 x CORE は luma(T) の累乗で暗くする
+const SCOPE_DENS_BASE = 0.6;
+const SCOPE_DENS_GAIN = 1.4;
+const SCOPE_DEEP = 0.35;
+const SCOPE_CORE = 0.6;
+const SCOPE_CORE_RHO = vec2f(0.55, 0.8);   // 核の帯 (ρ)
+const SCOPE_CORE_N = vec2f(0.3, 0.5);      // 核を持つ大きさ (n = l.a)
+const SCOPE_CORE_SAT = 0.1;                // 核の彩度の上げ幅
 
 // stainColor.js の buildStainTables (パレットが変わったときだけ書く)
 struct StainTables {
@@ -521,12 +534,21 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
   let spec = pow(saturate(dot(nrm, normalize(vec3f(SCOPE_LIGHT * 0.5, 1.0)))), 48.0);
 
   let thick = mix(0.7, 1.0, smoothstep(0.15, 0.85, l.a));      // 大きな塊ほど厚い
-  var body = col * pow(T, vec3f(k * m * thick * (1.0 + 1.2 * (noise.r - 0.5) + 1.0 * (noise.b - 0.5))));
+  // 密度 ρ: 薄い所は淡く (色ごとの指数を下げる)。指数が 1 を超えると色相が動く (橙が赤へ) ので、
+  // 濃い所の上乗せと核の帯は透過率の輝度の累乗 (スカラー) で暗くする
+  let rho = s.b;
+  let dens = SCOPE_DENS_BASE + SCOPE_DENS_GAIN * rho;
+  let big = smoothstep(SCOPE_CORE_N.x, SCOPE_CORE_N.y, l.a);     // 大きな細胞だけ (小さな密な塊は暗くしない)
+  let core = smoothstep(SCOPE_CORE_RHO.x, SCOPE_CORE_RHO.y, rho) * big;
+  let deep = SCOPE_DEEP * max(dens - 1.0, 0.0) * big;
+  let lt = luma(T);
+  var body = col * pow(T, vec3f(k * m * thick * (1.0 + 1.2 * (noise.r - 0.5) + 1.0 * (noise.b - 0.5)) * min(dens, 1.0)));
+  body *= pow(lt, k * (deep + SCOPE_CORE * core));
+  body = max(mix(vec3f(luma(body)), body, 1.0 + SCOPE_CORE_SAT * core), vec3f(0.0));
   body *= 1.0 + SCOPE_RELIEF * clamp(tilt, -1.0, 1.0);
-  body *= 1.0 - 0.2 * smoothstep(0.85, 1.0, l.a);              // 核小体
   body += SCOPE_SPEC * spec;
   let ring = cover * (1.0 - saturate(d - 1.3 * w + 0.5));
-  let outline = col * pow(T, vec3f(k * 2.2)) * 0.6;
+  let outline = col * pow(T, vec3f(k * 2.2)) * 0.6 * pow(lt, k * deep);
   // 種類の区切り線: 接する別種の小器官を別の物に見せる (色 = 両側の輪郭の色の平均を暗く)
   let sepCol = col * 0.5 * (pow(T0, vec3f(k * 2.2)) + pow(T1, vec3f(k * 2.2))) * 0.5;
   let sep = SCOPE_SEP_ALPHA * cover * sp.keep * select(0.0, 1.0, sp.i0 != sp.i1) * saturate(SCOPE_SEP_W * w + 0.5 - abs(dsw));
