@@ -9,7 +9,7 @@ import { SCOPE_BG, MAX_STAIN_TYPES } from '../../stainColor.js';
 export const ORGANIC_FIELDS = [
     'weightNorm', 'splatRadius', 'fieldGain', 'style', 'shape', 'threshold', 'nucleusThreshold', 'speciesTint',
     'dpr', 'rimStrength', 'coreThreshold', 'scopeStain', 'scopeVignette', 'scopeSpeck',
-    'fieldW', 'fieldH', 'margin', 'numTypes',
+    'fieldW', 'fieldH', 'margin', 'numTypes', 'scopeIsolation',
 ];
 export const ORGANIC_UNIFORM_FLOATS = ORGANIC_FIELDS.length;
 
@@ -42,6 +42,7 @@ struct OrganicParams {
   fieldH: f32,
   margin: f32,            // field の余白 (px)
   numTypes: f32,          // パレットの種類数 (1..16)。scope の種類の角度
+  scopeIsolation: f32,    // scope: 純粋な細胞の周りの異種を large から除く割合 (0 = フェーズ 2 と同じ)
 };
 
 ${STYLE_CONSTS}
@@ -52,6 +53,33 @@ const TAU = 6.2831853;
 
 fn meanColor(v: vec4f) -> vec3f {
   return v.rgb / max(v.a, EPS);
+}
+
+// scope: 種類の角度の平均ベクトル e から連続な種類座標 u (種類 t で整数) を返す
+fn speciesCoord(e: vec2f) -> f32 {
+  let ee = select(e, vec2f(1.0, 0.0), length(e) < 1e-6);
+  return atan2(ee.y, ee.x) / (TAU / max(O.numTypes, 1.0)) - 0.5;
+}
+
+// N を周期とする種類座標の距離
+fn circDist(a: f32, b: f32) -> f32 {
+  let N = max(O.numTypes, 1.0);
+  let d = abs(a - b);
+  let r = d - N * floor(d / N);
+  return min(r, N - r);
+}
+
+// scope の異種の分離: large ぼかし l の主な種類 D と、そこが 1 種類で占められている度合い (0..1)。
+// |e| だけでは隣の種類の混合 (N = 6 の等量で cos 30° = 0.87) を見分けられないので、u が D の中心からずれた分でも下げる
+const SCOPE_ISO_R = vec2f(0.55, 0.85);
+const SCOPE_ISO_U = vec2f(0.1, 0.25);
+
+fn dominantSpecies(l: vec4f) -> vec2f {
+  let e = l.rg / max(l.a, EPS);
+  let u = speciesCoord(e);
+  let D = round(u);
+  let pure = smoothstep(SCOPE_ISO_R.x, SCOPE_ISO_R.y, length(e)) * (1.0 - smoothstep(SCOPE_ISO_U.x, SCOPE_ISO_U.y, abs(u - D)));
+  return vec2f(D, pure);
 }
 `;
 
@@ -156,6 +184,8 @@ export const shapeWGSL = ORGANIC_SHARED + FULLSCREEN_VS + /* wgsl */`
 @group(0) @binding(0) var<uniform> O: OrganicParams;
 @group(0) @binding(1) var src: texture_2d<f32>;          // 余白付き
 @group(0) @binding(2) var granuleSrc: texture_2d<f32>;   // 余白付き
+@group(0) @binding(3) var prevLarge: texture_2d<f32>;    // fsSoft (scope) だけ: 前フレームの large ぼかし (このフレームでは shape のあとに書かれる)
+@group(0) @binding(4) var prevSamp: sampler;
 
 // 本体 + 余白に落ちた反対側の端のはみ出し分 (余白 <= field なので各軸 3 通りまで)
 fn folded(t: texture_2d<f32>, x: vec2i) -> vec4f {
@@ -224,12 +254,52 @@ struct ShapeSoftOut {
   @location(1) soft: vec4f,
 };
 
+// scope の異種の分離: 前フレームの large で 1 種類が占める所 (主な種類 D) の、D と違う種類のテクセルは体の場 b への寄与を減らす
+// (壁を押し出さない)。D と純度は減衰しない rg / a から求める (減衰した場から求めると、減らした分だけ純度が上がって
+// さらに減らす正のフィードバックになり、混ざった生物が削られる)。最初のフレームは 0 なので減衰しない。
+// large のぼかしは細胞と同じくらいの大きさなので、細胞の中の異種の核と外から近づいた塊を純度では区別できない。
+// そこで D に周りを囲まれたテクセル (核) は減衰しない: 8 方向 x 3 距離 (スプラット半径の 1〜3 倍) の生の field に D があるか
+const ISO_DIRS = 8;
+const ISO_STEPS = 3;
+const ISO_D_V = 1.5;                       // D がある: D 方向に射影した field (平均密度 = 1) がこれ以上
+const ISO_ENCLOSED = vec2f(0.65, 0.9);     // 囲まれた方向の割合 -> 減衰しない
+
+fn enclosure(x: vec2i, D: f32) -> f32 {
+  let a = TAU * (D + 0.5) / max(O.numTypes, 1.0);
+  let eD = vec2f(cos(a), sin(a));
+  let stepPx = O.splatRadius * O.fieldH;   // ワールドの高さ = 1
+  var hits = 0.0;
+  for (var k = 0; k < ISO_DIRS; k++) {
+    let t = TAU * f32(k) / f32(ISO_DIRS);
+    let dir = vec2f(cos(t), sin(t));
+    var found = 0.0;
+    for (var j = 1; j <= ISO_STEPS; j++) {
+      let f = folded(src, x + vec2i(round(dir * stepPx * f32(j))));
+      found = max(found, step(ISO_D_V, dot(f.rg, eD) * O.fieldGain));
+    }
+    hits += found;
+  }
+  return smoothstep(ISO_ENCLOSED.x, ISO_ENCLOSED.y, hits / f32(ISO_DIRS));
+}
+
+fn isolation(f: vec4f, x: vec2i) -> f32 {
+  let l = textureSampleLevel(prevLarge, prevSamp, (vec2f(x) + 0.5) / vec2f(O.fieldW, O.fieldH), 0.0);
+  let dom = dominantSpecies(l);
+  var foreign = dom.y * saturate(circDist(speciesCoord(f.rg / max(f.a, EPS)), dom.x));
+  if (foreign > 0.0) { foreign *= 1.0 - enclosure(x, dom.x); }
+  return 1.0 - O.scopeIsolation * foreign;
+}
+
 @fragment
 fn fsSoft(@builtin(position) frag: vec4f) -> ShapeSoftOut {
   let f = folded(src, vec2i(frag.xy));
   var out: ShapeSoftOut;
   out.shaped = shapeField(f);
   out.soft = softField(f);
+  if (O.style == STYLE_SCOPE) {    // b = 体の場 (異種を除いた c_soft)。rg / a は減衰しない (種類の判定と細胞質の色)
+    out.soft.b = out.soft.a;
+    if (O.scopeIsolation > 0.0) { out.soft.b *= isolation(f, vec2i(frag.xy)); }
+  }
   return out;
 }
 
@@ -448,8 +518,11 @@ const SCOPE_DENS_GAIN = 1.4;
 const SCOPE_DEEP = 0.35;
 const SCOPE_CORE = 0.6;
 const SCOPE_CORE_RHO = vec2f(0.55, 0.8);   // 核の帯 (ρ)
-const SCOPE_CORE_N = vec2f(0.3, 0.5);      // 核を持つ大きさ (n = l.a)
+const SCOPE_CORE_N = vec2f(0.3, 0.5);      // 核を持つ大きさ (n = l.b)
 const SCOPE_CORE_SAT = 0.1;                // 核の彩度の上げ幅
+// 異種の塊 (純粋な細胞の近くの別の種類) を壁の外でも描く密度 (ρ) と、細胞の近さ (l.b)
+const SCOPE_FOREIGN_RHO = 0.35;
+const SCOPE_FOREIGN_NEAR = vec2f(0.03, 0.08);
 
 // stainColor.js の buildStainTables (パレットが変わったときだけ書く)
 struct StainTables {
@@ -492,7 +565,8 @@ fn desaturate(c: vec3f, keep: f32) -> vec3f {
 
 fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
   let m = s.a;
-  let n = l.a + (noise.g - 0.5) * 0.08;
+  let nb = l.b;                                                // 体の場 (異種を除いた c_soft。scopeIsolation = 0 なら l.a と同じ)
+  let n = nb + (noise.g - 0.5) * 0.08;
   let k = O.scopeStain / SCOPE_STAIN_REF;
   let w = O.dpr;
   let line = vec3f(1.0, 1.0, 0.96);
@@ -520,7 +594,16 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
   let T1 = stains.transmit[sp.i1].rgb;
   let T = mix(T0, T1, saturate(dsw + 0.5));
   let d = (m - SCOPE_BODY) / max(fwidth(m), 1e-4);             // 小器官の輪郭からの px
-  let gate = select(aaStep(n, SCOPE_GATE * O.scopeSpeck), 1.0, O.scopeSpeck <= 0.0);    // 体の外の小さな塊は描かない
+  let rho = s.b;
+  // 体の外の小さな塊は描かない。ただし純粋な細胞の近くの異種の塊 (壁が押し出されないので n が低い) は、密度があれば
+  // 壁の外の独立した点として描く (フェーズ 3)。fwidth を使うので分岐の外で計算する
+  // 小器官のゲートは減衰しない l.a で判定する (異種を除いた分だけ壁が縮んでも、小器官の見え方は変えない)
+  let nGate = select(aaStep(l.a + (noise.g - 0.5) * 0.08, SCOPE_GATE * O.scopeSpeck), 1.0, O.scopeSpeck <= 0.0);
+  let rhoGate = aaStep(rho, SCOPE_FOREIGN_RHO);
+  let dom = dominantSpecies(l);
+  let near = smoothstep(SCOPE_FOREIGN_NEAR.x, SCOPE_FOREIGN_NEAR.y, nb);    // 遠い裾の中の塊は対象外 (何も無い所の塊と同じ扱い)
+  let foreignS = select(0.0, dom.y * near * saturate(circDist(speciesCoord(es), dom.x)), O.scopeIsolation > 0.0);
+  let gate = max(nGate, foreignS * rhoGate);
   let pure = gate * mix(SCOPE_MIX_COVER, 1.0, sp.keep);         // 混合域 (離れた種類の隙間をぼかしが埋めた所) は薄く: 下の細胞質・背景が見える
   let cover = saturate(d + 0.5) * pure;
   col = mix(col, line, 0.4 * saturate(0.5 * w + 0.5 - abs(d + 1.5 * w)) * pure);
@@ -533,12 +616,11 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
   let nrm = normalize(vec3f(-g * SCOPE_SLOPE, 1.0));
   let spec = pow(saturate(dot(nrm, normalize(vec3f(SCOPE_LIGHT * 0.5, 1.0)))), 48.0);
 
-  let thick = mix(0.7, 1.0, smoothstep(0.15, 0.85, l.a));      // 大きな塊ほど厚い
+  let thick = mix(0.7, 1.0, smoothstep(0.15, 0.85, nb));      // 大きな塊ほど厚い
   // 密度 ρ: 薄い所は淡く (色ごとの指数を下げる)。指数が 1 を超えると色相が動く (橙が赤へ) ので、
   // 濃い所の上乗せと核の帯は透過率の輝度の累乗 (スカラー) で暗くする
-  let rho = s.b;
   let dens = SCOPE_DENS_BASE + SCOPE_DENS_GAIN * rho;
-  let big = smoothstep(SCOPE_CORE_N.x, SCOPE_CORE_N.y, l.a);     // 大きな細胞だけ (小さな密な塊は暗くしない)
+  let big = smoothstep(SCOPE_CORE_N.x, SCOPE_CORE_N.y, nb);     // 大きな細胞だけ (小さな密な塊は暗くしない)
   let core = smoothstep(SCOPE_CORE_RHO.x, SCOPE_CORE_RHO.y, rho) * big;
   let deep = SCOPE_DEEP * max(dens - 1.0, 0.0) * big;
   let lt = luma(T);

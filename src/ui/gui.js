@@ -89,6 +89,7 @@ export function createGUI(params, actions, { advanced = false, preset = CUSTOM }
             scopeStain: organic.add(params, 'scopeStain', 0, 4, 0.05),
             scopeVignette: organic.add(params, 'scopeVignette', 0, 1, 0.01),
             scopeSpeck: organic.add(params, 'scopeSpeck', 0, 1, 0.01),
+            scopeIsolation: organic.add(params, 'scopeIsolation', 0, 1, 0.01),
         });
         showStyleControls();
         organic.add(params, 'showParticles');
