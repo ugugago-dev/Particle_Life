@@ -433,7 +433,8 @@ const SCOPE_PURITY_LO = 0.3;
 const SCOPE_PURITY_HI = 0.55;
 const SCOPE_PURITY_CAP_LO = 0.55;         // 種類が多いとき (隣同士の色が近い) は R がこれ以上なら必ず色を残す
 const SCOPE_PURITY_CAP_HI = 0.75;
-const SCOPE_MIX_LIGHT = 0.5;               // 混合域の灰色を明るくする割合 (0 = 同じ輝度)
+const SCOPE_MIX_LIGHT = 0.5;               // 細胞質: 混合域の灰色を明るくする割合 (0 = 同じ輝度)
+const SCOPE_MIX_COVER = 0.0;               // 小器官: 純度が低い所 (keep = 0) の不透明度 (隙間をぼかしが埋めた所を隙間に見せる)
 const SCOPE_SEP_W = 0.4;                   // 種類の区切り線の半幅 (dpr px)
 const SCOPE_SEP_ALPHA = 0.5;
 
@@ -502,13 +503,14 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
 
   // 小器官: 隣の種類との切り替え (約 1 px の AA)
   let dsw = sp.side / max(gradE, 1e-5);                        // 切り替えからの px (i1 側が正)
-  let T0 = desaturate(stains.transmit[sp.i0].rgb, sp.keep);
-  let T1 = desaturate(stains.transmit[sp.i1].rgb, sp.keep);
+  let T0 = stains.transmit[sp.i0].rgb;
+  let T1 = stains.transmit[sp.i1].rgb;
   let T = mix(T0, T1, saturate(dsw + 0.5));
   let d = (m - SCOPE_BODY) / max(fwidth(m), 1e-4);             // 小器官の輪郭からの px
   let gate = select(aaStep(n, SCOPE_GATE * O.scopeSpeck), 1.0, O.scopeSpeck <= 0.0);    // 体の外の小さな塊は描かない
-  let cover = saturate(d + 0.5) * gate;
-  col = mix(col, line, 0.4 * saturate(0.5 * w + 0.5 - abs(d + 1.5 * w)) * gate);
+  let pure = gate * mix(SCOPE_MIX_COVER, 1.0, sp.keep);         // 混合域 (離れた種類の隙間をぼかしが埋めた所) は薄く: 下の細胞質・背景が見える
+  let cover = saturate(d + 0.5) * pure;
+  col = mix(col, line, 0.4 * saturate(0.5 * w + 0.5 - abs(d + 1.5 * w)) * pure);
 
   let e = 1.0 / vec2f(textureDimensions(smallBlur));
   let g = vec2f(
