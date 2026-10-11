@@ -224,3 +224,5 @@ PC 版の organic (`docs/organic-rendering-spec.md`) は WebGPU の MRT・rgba16
 ## organic のスタイル (決定: scope が既定)
 
 スマホ版の organic は **scope** を既定にする (`params.organicStyle = 'scope'`)。glass は実装済みなので `view.organic.organicStyle === 'glass'` のとき従来どおり描く (UI には出さない)。scope の仕様は `docs/organic-rendering-spec.md` の「scope」節 (`softLarge`、`thresholdScale = 1.6`、`fine = {splat 0.4, small 0.4, large 1}`、`paper`、`scopeStain` / `scopeVignette` / `scopeSpeck`) と `src/gpu/shaders/organic.wgsl.js` の scope 部分。
+
+scope の種類の描き分け (`docs/scope-species-spec.md` フェーズ 1) は `organicGl.js` にも入れてある。field (rg = cosθ, sinθ の加算、b = 0) は rgba16f の負値を保つ (3 次 B スプラインの重みは非負なのでリンギングは出ない)。染色の透過率は `stainColor.js` の `buildStainTables` をパレットが変わったときだけ作り、`uTransmit[16]` と `uNumTypes` で composite へ渡す (GLSL の OKLab は削除)。式・定数は PC の `decodeSpecies` / `scopeStyle` と同じ。

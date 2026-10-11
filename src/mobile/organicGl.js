@@ -1,6 +1,7 @@
 // organic 描画 (スマホ版、scope / glass)。PC 版 src/gpu/renderer.js と organic.wgsl.js を WebGL2 へ移植 (docs/mobile-spec.md の phase 2)
 
 import { ORGANIC_STYLES } from '../organicStyles.js';
+import { SCOPE_BG, MAX_STAIN_TYPES, buildStainTables } from '../stainColor.js';
 
 const MAX_PALETTE = 16;
 const SIGMA_MAX_TEXELS = 4;               // これを超える σ は 1/2 ずつ縮小してからぼかす
@@ -13,20 +14,27 @@ const MAX_SOFT_LEVEL = 2;                 // soft 整形はこの段まで field
 
 const QUAD = `vec2 quadCorner() { return vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)) * 2.0 - 1.0; }`;
 
-// 粒子 -> field (rgb = 色 x w, a = w) の加算。y はワールド上端が画面上端 (glRenderer の pxToClip と同じ向き)
+// 粒子 -> field (rgb = 色 x w, a = w) の加算。scope は rgb = (cosθ, sinθ, 0) x w (θ = 種類の角度。docs/scope-species-spec.md)。y はワールド上端が画面上端 (glRenderer の pxToClip と同じ向き)
 const SPLAT_VS = `#version 300 es
 precision highp float;
 layout(location = 0) in vec3 aInst;   // x, y, type
 uniform vec2 uWorld;
 uniform float uRadius;                // ワールド単位
 uniform vec4 uPalette[${MAX_PALETTE}];
+uniform float uNumTypes;              // scope: パレットの種類数 (1..16)。0 なら glass (色をそのまま)
 out vec2 vD;
 out vec3 vColor;
 ${QUAD}
 void main() {
   vec2 c = quadCorner();
   vD = c;
-  vColor = uPalette[min(int(aInst.z + 0.5), ${MAX_PALETTE - 1})].rgb;
+  int t = min(int(aInst.z + 0.5), ${MAX_PALETTE - 1});
+  if (uNumTypes > 0.0) {
+    float a = 6.2831853 * (float(t) + 0.5) / uNumTypes;
+    vColor = vec3(cos(a), sin(a), 0.0);
+  } else {
+    vColor = uPalette[t].rgb;
+  }
   vec2 p = (aInst.xy + c * uRadius) / uWorld;
   gl_Position = vec4(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);
 }
@@ -69,7 +77,8 @@ void main() {
 }
 `;
 
-// occupancy 整形 (scope の small): 1 - exp(-2 max(v - threshold, 0))。threshold は thresholdScale 倍済み
+// occupancy 整形 (scope の small): 1 - exp(-2 max(v - threshold, 0))。threshold は thresholdScale 倍済み。
+// 出力 = (e x c, 0, c)、e = f.rg / f.a (種類の角度の平均ベクトル。b は将来の密度用に 0)
 const SHAPE_OCC_FS = `#version 300 es
 precision highp float;
 uniform sampler2D uSrc;
@@ -80,11 +89,11 @@ void main() {
   vec4 f = texelFetch(uSrc, ivec2(gl_FragCoord.xy), 0);
   float v = max(f.a * uGain, 0.0);
   float c = 1.0 - exp(-2.0 * max(v - uThreshold, 0.0));
-  outColor = vec4(f.rgb / max(f.a, 1e-4) * c, c);
+  outColor = vec4(f.rg / max(f.a, 1e-4) * c, 0.0, c);
 }
 `;
 
-// soft 整形 (scope の large) 1 - exp(-(v / 5)^2) をテクセルごとに掛けてから uFactor^2 の箱平均で縮小 (shape + 縮小を 1 パスに)
+// soft 整形 (scope の large) 1 - exp(-(v / 5)^2) を (e x c, 0, c) へテクセルごとに掛けてから uFactor^2 の箱平均で縮小 (shape + 縮小を 1 パスに)
 const SOFT_DOWN_FS = `#version 300 es
 precision highp float;
 uniform sampler2D uSrc;
@@ -102,7 +111,7 @@ void main() {
       vec4 f = texelFetch(uSrc, min(base + ivec2(i, j), hi), 0);
       float v = max(f.a * uGain, 0.0) / 5.0;
       float c = 1.0 - exp(-v * v);
-      acc += vec4(f.rgb / max(f.a, 1e-4) * c, c);
+      acc += vec4(f.rg / max(f.a, 1e-4) * c, 0.0, c);    // e x c の箱平均 (負値あり)
     }
   }
   outColor = acc / float(uFactor * uFactor);
@@ -242,8 +251,10 @@ uniform float uReliefScale;           // 斜光の勾配の倍率 (rMax の smal
 uniform float uStain;
 uniform float uVignette;
 uniform float uSpeck;
+uniform float uNumTypes;              // パレットの種類数 (1..16)
+uniform vec4 uTransmit[${MAX_STAIN_TYPES}];            // 種類ごとの染色の透過率 (stainColor.js の buildStainTables)
 out vec4 outColor;
-const vec3 SCOPE_BG = vec3(0.93, 0.94, 0.88);
+const vec3 SCOPE_BG = vec3(${SCOPE_BG.join(', ')});    // stainColor.js と共有
 const float SCOPE_EDGE = 0.2;
 const float SCOPE_GATE = 0.2;
 const float SCOPE_BODY = 0.35;
@@ -253,48 +264,46 @@ const vec2 SCOPE_LIGHT = vec2(-0.6, -0.8);
 const float SCOPE_SLOPE = 3.0;
 const float SCOPE_RELIEF = 0.18;
 const float SCOPE_SPEC = 0.15;
-const float STAIN_DL = 0.15;
-const float STAIN_CHROMA = 1.2;
-const float STAIN_CMAX = 0.19;
+const float PI = 3.14159265;
+const float TAU = 6.2831853;
+const float SCOPE_PURITY_LO = 0.3;
+const float SCOPE_PURITY_HI = 0.55;
+const float SCOPE_PURITY_CAP_LO = 0.55;
+const float SCOPE_PURITY_CAP_HI = 0.75;
+const float SCOPE_MIX_LIGHT = 0.5;
+const float SCOPE_MIX_COVER = 0.0;
+const float SCOPE_SEP_W = 0.4;
+const float SCOPE_SEP_ALPHA = 0.5;
 ${BSPLINE_GLSL}
-vec3 srgbToLinear(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), greaterThan(c, vec3(0.04045))); }
-vec3 linearToSrgb(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, greaterThan(c, vec3(0.0031308))); }
-vec3 toOklab(vec3 c) {
-  vec3 lms = pow(max(vec3(
-    dot(vec3(0.4122214708, 0.5363325363, 0.0514459929), c),
-    dot(vec3(0.2119034982, 0.6806995451, 0.1073969566), c),
-    dot(vec3(0.0883024619, 0.2817188376, 0.6299787005), c)), vec3(0.0)), vec3(1.0 / 3.0));
-  return vec3(
-    dot(vec3(0.2104542553, 0.7936177850, -0.0040720468), lms),
-    dot(vec3(1.9779984951, -2.4285922050, 0.4505937099), lms),
-    dot(vec3(0.0259040371, 0.7827717662, -0.8086757660), lms));
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+// 種類の角度の平均ベクトル e (|e| = 純度) から種類を復元する (organic.wgsl.js の decodeSpecies)。
+// i0 / i1 = e を挟む 2 つの種類 (角度順)、side = 切り替えの半直線までの e 空間の符号付き距離 (i1 側が正)、keep = 彩度を残す割合
+struct Species {
+  int i0;
+  int i1;
+  float side;
+  float keep;
+};
+Species decodeSpecies(vec2 e) {
+  float N = max(uNumTypes, 1.0);
+  float ang = TAU / N;
+  float pur = length(e);
+  vec2 ee = pur < 1e-6 ? vec2(1.0, 0.0) : e;                // atan2(0, 0) を避ける
+  float fl = floor(atan(ee.y, ee.x) / ang - 0.5);          // 連続な種類座標 u の整数部
+  Species sp;
+  sp.i0 = int(mod(fl, N));                                  // % は負で未定義なので float の mod (>= 0)
+  sp.i0 = min(sp.i0, int(N) - 1);
+  sp.i1 = sp.i0 + 1 >= int(N) ? 0 : sp.i0 + 1;
+  float phi = (fl + 1.0) * ang;
+  sp.side = dot(e, vec2(-sin(phi), cos(phi)));
+  float h = PI / max(N, 2.0);                               // N = 1 は 2 として扱う (常に keep = 1)
+  float a = cos(2.0 * h);
+  float b = cos(h);
+  sp.keep = smoothstep(min(mix(a, b, SCOPE_PURITY_LO), SCOPE_PURITY_CAP_LO), min(mix(a, b, SCOPE_PURITY_HI), SCOPE_PURITY_CAP_HI), pur);
+  return sp;
 }
-vec3 fromOklab(vec3 lab) {
-  vec3 lms = vec3(
-    lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z,
-    lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z,
-    lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z);
-  vec3 c = lms * lms * lms;
-  return vec3(
-    dot(vec3(4.0767416621, -3.3077115913, 0.2309699292), c),
-    dot(vec3(-1.2684380046, 2.6097574011, -0.3413193965), c),
-    dot(vec3(-0.0041960863, -0.7034186147, 1.7076147010), c));
-}
-// 種類の色 -> 密度 1 の染色の色 (OKLCH の色相を保って彩度を上げ L を下げる。範囲外は同じ L の灰色へ寄せる)
-vec3 stainColor(vec3 c) {
-  vec3 lab = toOklab(srgbToLinear(c));
-  float chroma = length(lab.yz);
-  float t = smoothstep(0.74, 0.9, lab.x);
-  float L = max(lab.x - STAIN_DL * (1.0 - 0.75 * t), 0.0);
-  vec2 ab = chroma > 1e-4 ? lab.yz * (min(chroma * STAIN_CHROMA, STAIN_CMAX) / chroma) : vec2(0.0);
-  vec3 rgb = fromOklab(vec3(L, ab));
-  vec3 gray = vec3(L * L * L);
-  vec3 over = mix(vec3(1e3), (1.0 - gray) / (rgb - gray), greaterThan(rgb, vec3(1.0)));
-  vec3 under = mix(vec3(1e3), gray / (gray - rgb), lessThan(rgb, vec3(0.0)));
-  float k = min(1.0, min(min(min(over.x, over.y), over.z), min(min(under.x, under.y), under.z)));
-  return clamp(linearToSrgb(clamp(gray + (rgb - gray) * k, 0.0, 1.0)), 0.03, 1.0);
-}
-vec3 stainTransmit(vec3 c) { return min(stainColor(c) / SCOPE_BG, vec3(1.0)); }
+// 灰色へ (1 - keep) だけ寄せる (透過率なので明るくする = 淡い染色)
+vec3 desaturate(vec3 c, float keep) { return mix(vec3(mix(luma(c), 1.0, SCOPE_MIX_LIGHT)), c, keep); }
 void main() {
   vec2 uv = gl_FragCoord.xy / uCanvas;
   vec3 noise = texelFetch(uPaper, ivec2(gl_FragCoord.xy), 0).rgb;
@@ -317,21 +326,36 @@ void main() {
   float w = uDpr;
   vec3 line = vec3(1.0, 1.0, 0.96);
 
+  // 種類: 微分は分岐の外で先に取る (atan2 の折り返しを避けるため u ではなく e の変化を使う)
+  vec2 es = s.rg / max(s.a, 1e-4);
+  float gradE = length(dFdx(es)) + length(dFdy(es));         // 1 px あたりの e の変化
+  Species sp = decodeSpecies(es);
+  Species spl = decodeSpecies(l.rg / max(l.a, 1e-4));
+
   vec3 col = SCOPE_BG * (1.0 + 0.05 * (noise.g - 0.5));
   float dist = (n - SCOPE_EDGE) / max(fwN, 1e-4);
   float inside = clamp(dist + 0.5, 0.0, 1.0);
-  if (inside > 0.0) col *= mix(vec3(1.0), pow(stainTransmit(l.rgb / max(l.a, 1e-4)), vec3(SCOPE_CYTO * uStain)), inside);
+  if (inside > 0.0) {
+    // 細胞質: 隣の種類との線形補間 (u の幅 0.5 の柔らかい切り替え)
+    float hl = sin(min(PI / max(uNumTypes, 1.0), 0.5 * PI));
+    vec3 Tl = desaturate(mix(uTransmit[spl.i0].rgb, uTransmit[spl.i1].rgb, clamp(spl.side / max(hl, 0.1) + 0.5, 0.0, 1.0)), spl.keep);
+    col *= mix(vec3(1.0), pow(Tl, vec3(SCOPE_CYTO * uStain)), inside);
+  }
   float fade = smoothstep(0.002 * uGradScale, 0.005 * uGradScale, fwN);
   col = mix(col, line, 0.7 * clamp(0.6 * w + 0.5 - abs(dist + 1.6 * w), 0.0, 1.0) * fade);
   col = mix(col, vec3(0.32, 0.33, 0.33), 0.65 * clamp(0.7 * w + 0.5 - abs(dist), 0.0, 1.0) * fade);
 
   float d = (m - SCOPE_BODY) / max(fwM, 1e-4);
   float gate = uSpeck <= 0.0 ? 1.0 : clamp((n - SCOPE_GATE * uSpeck) / max(fwN * 1.3, 1e-4) + 0.5, 0.0, 1.0);
-  float cover = clamp(d + 0.5, 0.0, 1.0) * gate;
+  float dsw = sp.side / max(gradE, 1e-5);                    // 種類の切り替えからの px (i1 側が正)
+  float pure = gate * mix(SCOPE_MIX_COVER, 1.0, sp.keep);    // 混合域 (離れた種類の隙間をぼかしが埋めた所) は薄く: 下の細胞質・背景が見える
+  float cover = clamp(d + 0.5, 0.0, 1.0) * pure;
   float edgeFade = smoothstep(0.015 * uGradScale, 0.045 * uGradScale, fwM);    // 鞍点 (勾配 ~0) では輪郭線を出さない (スマホ版だけ)
-  col = mix(col, line, 0.4 * clamp(0.5 * w + 0.5 - abs(d + 1.5 * w), 0.0, 1.0) * gate * edgeFade);
+  col = mix(col, line, 0.4 * clamp(0.5 * w + 0.5 - abs(d + 1.5 * w), 0.0, 1.0) * pure * edgeFade);
   if (cover > 0.0) {
-    vec3 T = stainTransmit(s.rgb / max(s.a, 1e-4));
+    vec3 T0 = uTransmit[sp.i0].rgb;
+    vec3 T1 = uTransmit[sp.i1].rgb;
+    vec3 T = mix(T0, T1, clamp(dsw + 0.5, 0.0, 1.0));
     vec2 g = gd * uReliefScale;
     float tilt = -dot(g, SCOPE_LIGHT) * SCOPE_SLOPE;
     vec3 nrm = normalize(vec3(-g * SCOPE_SLOPE, 1.0));
@@ -343,7 +367,11 @@ void main() {
     body += SCOPE_SPEC * spec;
     float ring = cover * (1.0 - clamp(d - 1.3 * w + 0.5, 0.0, 1.0)) * edgeFade;
     vec3 outline = col * pow(T, vec3(k * 2.2)) * 0.6;
+    // 種類の区切り線: 接する別種の小器官を別の物に見せる (色 = 両側の輪郭の色の平均を暗く)
+    vec3 sepCol = col * 0.5 * (pow(T0, vec3(k * 2.2)) + pow(T1, vec3(k * 2.2))) * 0.5;
+    float sep = SCOPE_SEP_ALPHA * cover * sp.keep * (sp.i0 != sp.i1 ? 1.0 : 0.0) * clamp(SCOPE_SEP_W * w + 0.5 - abs(dsw), 0.0, 1.0);
     col = mix(col, body, cover);
+    col = mix(col, sepCol, sep);
     col = mix(col, outline, ring);
   }
 
@@ -509,6 +537,8 @@ export class OrganicGl {
         this.copyCapacity = 0;
         this.copies = new Float32Array(0);
         this.palette = new Float32Array(MAX_PALETTE * 4);
+        this.transmit = new Float32Array(MAX_STAIN_TYPES * 4);    // scope の染色の透過率 (パレットが変わったときだけ作り直す)
+        this.transmitKey = '';
         this.plan = null;
         this.tapCache = new Map();
     }
@@ -690,6 +720,14 @@ export class OrganicGl {
         for (let t = 0; t < Math.min(view.palette.numTypes, MAX_PALETTE); t++) {
             pd[4 * t] = pal[3 * t]; pd[4 * t + 1] = pal[3 * t + 1]; pd[4 * t + 2] = pal[3 * t + 2]; pd[4 * t + 3] = 1;
         }
+        const numTypes = Math.min(Math.max(view.palette.numTypes, 1), MAX_PALETTE);
+        if (scope) {
+            const key = `${numTypes}:${Array.from(pal.subarray(0, 3 * numTypes)).join(',')}`;
+            if (key !== this.transmitKey) {
+                this.transmit = buildStainTables(pal, numTypes).transmit;
+                this.transmitKey = key;
+            }
+        }
         const copies = this.uploadCopies(sim, radius);
 
         // splat (加算)
@@ -705,6 +743,7 @@ export class OrganicGl {
         gl.uniform1f(sp.u.uRadius, radius);
         gl.uniform1f(sp.u.uWeight, 1 / Math.max(1.5 * meanDensity * splat * splat, 1e-3));
         gl.uniform4fv(sp.u.uPalette, pd);
+        gl.uniform1f(sp.u.uNumTypes, scope ? numTypes : 0);
         gl.bindVertexArray(ctx.vao);
         gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
         if (copies > 0) {
@@ -762,6 +801,8 @@ export class OrganicGl {
             gl.uniform1f(cp.u.uStain, org.scopeStain);
             gl.uniform1f(cp.u.uVignette, org.scopeVignette);
             gl.uniform1f(cp.u.uSpeck, org.scopeSpeck);
+            gl.uniform1f(cp.u.uNumTypes, numTypes);
+            gl.uniform4fv(cp.u.uTransmit, this.transmit);
             gl.activeTexture(gl.TEXTURE2);
             gl.bindTexture(gl.TEXTURE_2D, plan.paper.tex);
         } else {

@@ -59,6 +59,7 @@ scope のときだけ、field / shaped / small / large のチャンネルの意�
 - 小器官の安全弁は彩度を落とす (灰色へ寄せる) のではなく、不透明度 `cover` を `keep` 倍にする (隙間をぼかしが埋めた所を隙間として見せる)。灰色の版は光沢のある白い楔に見えた。細胞質だけは明るい灰色へ寄せる。
 - 細胞質の補間の幅は `saturate(side / sin(π/N) + 0.5)` (|e| = 1 で u の幅 0.5 にほぼ等しい)。
 - `stain[]` は uniform に入れているが composite は `transmit[]` だけ読む。
+- mobile (`organicGl.js`) も同じ式・定数で移植済み (`uTransmit[16]` + `uNumTypes`。`stain[]` は渡さない)。field が負値を持つが RGBA16F・線形補間・3 次 B スプライン (重みが非負) で問題なし。
 
 受け入れ (フェーズ 1):
 
