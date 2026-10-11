@@ -13,8 +13,8 @@
 | # | パス | 入力 -> 出力 | 内容 |
 |---|---|---|---|
 | 0 | paper (cell / scope だけ) | -> `paper` (rgba8unorm, canvas 解像度) | 画面固定のノイズ (紙の目・体の縁の揺らぎ・核の縁の揺らぎ。scope では粒状ノイズ・縁の揺らぎ・染色のむら) を焼く。canvas のサイズ / dpr が変わったとき (plan を作り直したとき) だけ |
-| 1 | splat | 粒子 -> `field` (rgba16float、周囲に余白) (+ cell だけ `granule` (r16float、余白付き)) | 粒子ごとの四角形 (4 頂点の triangle-strip、instance = 粒子) を加算。`field` = (色 x w, w)。カーネルは等方の `(1 - d^2)^3`。周期境界のコピーは描かず、端をまたぐ分は余白 (スプラット半径 + 1 px) に落とす。cell は MRT のパイプライン (`fsGranule`)、ほかは field だけのパイプライン (`fs`) |
-| 2 | shape | `field` -> `shaped` (L0) (+ cell だけ顆粒 -> 余白なしの `granule`) | 余白に落ちた端のはみ出しを反対側の端へ折り返して足し (周期境界)、スタイルに合わせて場を整形 (後述)。出力は `(平均色 x c, c)`。cell は顆粒も、`softLarge` のスタイル (scope) は large 用の柔らかい整形 `shaped large` も同じパスで書く (MRT、`fsGranule` / `fsSoft`) |
+| 1 | splat | 粒子 -> `field` (rgba16float、周囲に余白) (+ cell だけ `granule` (r16float、余白付き)) | 粒子ごとの四角形 (4 頂点の triangle-strip、instance = 粒子) を加算。`field` = (色 x w, w) (scope だけ `(w cosθ_t, w sinθ_t, 0, w)` = 種類の角度。下記 scope)。カーネルは等方の `(1 - d^2)^3`。周期境界のコピーは描かず、端をまたぐ分は余白 (スプラット半径 + 1 px) に落とす。cell は MRT のパイプライン (`fsGranule`)、ほかは field だけのパイプライン (`fs`) |
+| 2 | shape | `field` -> `shaped` (L0) (+ cell だけ顆粒 -> 余白なしの `granule`) | 余白に落ちた端のはみ出しを反対側の端へ折り返して足し (周期境界)、スタイルに合わせて場を整形 (後述)。出力は `(平均色 x c, c)` (scope は `(e x c, 0, c)`)。cell は顆粒も、`softLarge` のスタイル (scope) は large 用の柔らかい整形 `shaped large` も同じパスで書く (MRT、`fsGranule` / `fsSoft`) |
 | 3 | downsample | L(k-1) -> L(k) | 2x2 の箱平均で 1/2 ずつ縮小。ブラーの σ が大きいときだけ (下記)。`softLarge` は `shaped large` からも large 用の縮小列を作る |
 | 4 | blur x 4 | L(ks) -> small、L(kl) -> large (`softLarge` は `shaped large` の列から) | 分離ガウス (水平 -> 垂直) を small (disk) と large (ring) の 2 本。サンプラは repeat (周期境界)。表の `params` に `blurLarge` が無いスタイル (現在は無い) は large のブラーと、その分の縮小段を作らない |
 | 5 | composite | small + large + granule -> canvas | スタイルの着色。不透明。そのあとに粒子の重ね描き (`showParticles`) とポインタ円 |
@@ -108,7 +108,7 @@ scope のスプラットは 0.2 (= 0.4 x 0.5)。粒 (ごみ) 対策のために�
 - soft (scope の large だけ。`softLarge`): `c = 1 - exp(-(v / 5)^2)`。`threshold` に依存しない。疎なガス (v ≦ 2) は c ≦ 0.15、密な所 (v ≧ 10) は 0.98 以上に飽和。出力は `shaped large` へ `(平均色 x c, c)`。
 - nucleus (glass): 圧縮 `c0 = 1 - exp(-(v / 3.5)^1.8)` のあと `c = smoothstep(coreThreshold - 0.1, coreThreshold + 0.1, c0)`。「核 (密度が高い所) の指標」で、ガスも疎な粒の殻も 0。体・核・膜はすべてこの指標のぼかしから作る。
 
-出力は `(field.rgb / field.a * c, c)`。ぼかし後の `rgb / a` が加重平均色 (種類の色)。
+出力は `(field.rgb / field.a * c, c)`。ぼかし後の `rgb / a` が加重平均色 (種類の色)。scope だけは `(e * c, 0, c)` (`e = field.rg / field.a` = 種類の角度の平均ベクトル。b はフェーズ 2 の密度用に空けてある)。
 
 ## スタイル (`organicStyle`)
 
@@ -131,17 +131,24 @@ scope のスプラットは 0.2 (= 0.4 x 0.5)。粒 (ごみ) 対策のために�
 ### scope
 
 明視野の光学顕微鏡の像。淡い透過光の背景、細い壁で囲まれた半透明の細胞、染色された丸い小器官。**種類 (色) が一目で区別できること**が必須条件。
-`s` = small ぼかし (`m = s.a`、shape = occupancy。`threshold` が効く)、`l` = large ぼかし (`n = l.a`、softLarge の soft 整形。`threshold` に依存しない)、`Cs = s.rgb / s.a`、`Cl = l.rgb / l.a`。
+`s` = small ぼかし (`m = s.a`、shape = occupancy。`threshold` が効く)、`l` = large ぼかし (`n = l.a`、softLarge の soft 整形。`threshold` に依存しない)。色はぼかした色の平均ではなく、種類を復元してパレットの正確な染色で塗る (`docs/scope-species-spec.md` のフェーズ 1):
+
+- 種類の埋め込み: splat は種類 t を角度 `θ_t = 2π (t + 0.5) / N` (`N` = `OrganicParams.numTypes`、パレットの種類数、最大 16) の単位ベクトルにして足す。ぼかし後の `e = rg / a` (`es` = small、`el` = large) の向きが種類、`|e|` が純度 (1 = 1 種類、隣の種類との等量混合で `cos(π/N)`)。
+- 復元 (`decodeSpecies`): `u = atan2(e) / (2π/N) - 0.5`、`i0 = floor(u) mod N`、`i1 = i0 + 1` (e を挟む 2 つの種類)。2 つの境界 (角度 `(floor(u) + 1) 2π/N` の半直線) までの e 空間の符号付き距離 `side = dot(e, (-sin φ, cos φ))` (i1 側が正)。atan2 の折り返し・N = 2 や対蹠の種類 (e が原点を通る) でも連続。
+- 小器官の色: `T = mix(transmit[i0], transmit[i1], saturate(side / (|dpdx es| + |dpdy es|) + 0.5))` = 約 1 px で AA した硬い切り替え (第三の色相は出ない)。切り替えの位置に細い暗線 (半幅 `0.4 dpr`、不透明度 0.5、色 = 両側の輪郭の色の平均 x 0.5)。N = 1 (i0 = i1) では出さない。
+- 混合域の安全弁: 離れた種類の混合は角度が間の別の種類を指す (例: 6 種類で紫 + 黄 -> 緑)。純度 `|e|` を `cos(2π/N)` (2 つ離れた種類の等量混合) -> 0、`cos(π/N)` (隣の種類の等量混合) -> 1 に正規化し、正規化値 0.3 -> 0.55 の範囲 (ただし R の値で 0.55 / 0.75 を上限にする) の smoothstep を `keep` とし、透過率を淡い灰色 (`mix(luma(T), 1, 0.5)`。同じ輝度の灰色だと混合域が暗い灰色のしみになったため明るくした) へ `1 - keep` だけ寄せる。偽の種類が出る範囲は正規化値 0.21 (N = 6) / 0.30 (N = 10) / 0.32 (N = 16) 以下 (R で 0.58 / 0.85 / 0.94 以下)。N = 6 ではそこが完全に灰色になる。上限 (R 0.55 / 0.75) は種類が多いとき用で、正規化だけだと N = 10 / 16 では小器官の大半が灰色になった。そのため、隣同士の色が近い N ≧ 10 では、2〜3 つ離れた種類の混合が間の (色相も間の) 種類として出ることを許している。N ≦ 3 では全ての組が隣同士なので、3 種類がほぼ等量のときだけ効く。区切り線も `keep` 倍。
+- 細胞質の色: `el` から同様に復元し、隣の種類と線形補間 (`saturate(side / sin(π/N) + 0.5)`、u の幅 0.5 の柔らかい切り替え)。同じ安全弁。
+- 種類ごとの染色 `stain[16]` / 透過率 `transmit[16]` (`min(stain / 背景, 1)`) は `src/stainColor.js` の `buildStainTables` でパレットが変わったときだけ計算し、composite の binding 7 (uniform `StainTables`) へ書く。背景色 `SCOPE_BG` も stainColor.js の値を WGSL へ埋め込む。
 
 - 背景: 淡い暖色の透過光 `(.93,.94,.88)`。paper の `g` で ±2.5% の照明むら、`r` の粒状ノイズ (全体に ±8%)。接眼レンズのビネット = 中心からの距離を対角線の半分で割った `r` (角で 1、アスペクトを保った円) で `1 - 0.55 * scopeVignette * smoothstep(0.4, 1, r)` を全体に掛ける (0.6 で角は 0.67 倍。最大でも 0.45 倍で、真っ黒にはならない)。
-- 体 (細胞質): `n` (soft 整形の large ぼかし。+ 低周波ノイズ ±0.04) の等高線 `n = 0.2` の内側に、`Cl` の染色の透過率を `0.1 * scopeStain` 乗した、ごく薄い色を掛ける。壁 = 輪郭に沿った暗い灰色の線 (半幅 `0.7 dpr`、不透明度 0.65) と、その外側 `1.6 dpr` の明るい線 (屈折のハロー、不透明度 0.7)。どちらも `fwidth` の px 距離で AA し、勾配が弱い所 (`fwidth(n)` が 0.002〜0.005 未満) では出さない (glass の膜と同じ)。
-- 小器官: `m = 0.35` の等高線の内側を Beer-Lambert の吸収で染める。`col = 下の色 * pow(T, k * m * 厚み * 粒)`。体の外の小さな塊は描かない (`scopeSpeck`): `n < 0.2 * scopeSpeck` の所は隠す (`aaStep`、輪郭は `fwidth` で 1 px の AA。半透明にすると薄いしみが残るので、0 か 1 の切り替え)。`scopeSpeck` = 1 で体の輪郭 (n = 0.2) の外は描かず、0.5 で輪郭のすぐ外 (n ≧ 0.1) まで、0 で隠さない。
-  - `T = stainColor(Cs) / 背景` (密度 1 の染色の色を背景で割った透過率)、`k = scopeStain / 1.5` (既定で密度 1 の所がちょうど `stainColor`)。薄い縁は淡く、濃い芯は深く、同じ色相で濃くなる。
+- 体 (細胞質): `n` (soft 整形の large ぼかし。+ 低周波ノイズ ±0.04) の等高線 `n = 0.2` の内側に、`el` から復元した種類の染色の透過率を `0.1 * scopeStain` 乗した、ごく薄い色を掛ける。壁 = 輪郭に沿った暗い灰色の線 (半幅 `0.7 dpr`、不透明度 0.65) と、その外側 `1.6 dpr` の明るい線 (屈折のハロー、不透明度 0.7)。どちらも `fwidth` の px 距離で AA し、勾配が弱い所 (`fwidth(n)` が 0.002〜0.005 未満) では出さない (glass の膜と同じ)。
+- 小器官: `m = 0.35` の等高線の内側を Beer-Lambert の吸収で染める。`col = 下の色 * pow(T, k * m * 厚み * 粒)` (T = 上記の復元した種類の透過率)。体の外の小さな塊は描かない (`scopeSpeck`): `n < 0.2 * scopeSpeck` の所は隠す (`aaStep`、輪郭は `fwidth` で 1 px の AA。半透明にすると薄いしみが残るので、0 か 1 の切り替え)。`scopeSpeck` = 1 で体の輪郭 (n = 0.2) の外は描かず、0.5 で輪郭のすぐ外 (n ≧ 0.1) まで、0 で隠さない。
+  - `T = transmit[種類]` (密度 1 の染色の色を背景で割った透過率)、`k = scopeStain / 1.5` (既定で密度 1 の所がちょうど `stainColor`)。薄い縁は淡く、濃い芯は深く、同じ色相で濃くなる。
   - `厚み = mix(0.7, 1, smoothstep(0.15, 0.85, n))` (大きな塊ほど厚く、中心が濃い)。`粒 = 1 + 1.2 (r - 0.5) + (b - 0.5)` (paper の細かい粒と低周波のむらによる染色ムラ。画面固定なので粒子が動いても揺らがない)。
   - 輪郭: 縁の内側 `1.3 dpr` に自分の色を暗くした線 (`下の色 * T^(2.2 k) * 0.6`)、外側 `1.5 dpr` に明るい線 (不透明度 0.4)。`fwidth(m)` による AA。
   - 斜光のレリーフ (DIC 風): small の `a` の勾配 (±1 テクセルの中央差分) を高さとみなし、固定光源 (左上) の陰影 (振幅 ±0.18) と、光源側に寄せた半ベクトルでの小さなスペキュラ (`pow(.., 48) * 0.15`)。
   - 核小体: `n >= 0.85` (大きな塊の芯) では最大 20% 暗くする。
-- `stainColor` (種類を見分ける色): パレットの色を OKLab にして、色相 (a, b の向き) を保ったまま彩度 x1.2 (上限 0.19)、L を 0.15 下げる (L > 0.74 の黄は下げ幅を最大 75% 減らす。暗い黄は黄に見えない)。sRGB の範囲外は、線形 RGB で同じ L の灰色へ寄せて収める (色相が保たれる)。
+- `stainColor` (種類を見分ける色、`src/stainColor.js`。CPU で計算): パレットの色を OKLab にして、色相 (a, b の向き) を保ったまま彩度 x1.2 (上限 0.19)、L を 0.15 下げる (L > 0.74 の黄は下げ幅を最大 75% 減らす。暗い黄は黄に見えない)。sRGB の範囲外は、線形 RGB で同じ L の灰色へ寄せて収める (色相が保たれる)。
   - 色の累乗ではなく `背景 * (色 / 背景)^密度` で濃淡をつける (色相がずれにくい)。単純に色を累乗すると橙が赤へ寄って赤と区別できなくなる (6 種類の橙 / 赤の OKLab 色差 ΔE x100 が 3 まで下がった)。
   - 密度 1 での種類間の最小 ΔE x100 (計算値、カッコ内はパレットそのままの値): 3 種類 29 (25)、6 種類 14 (11)、10 種類 5 (7)。10 種類では橙と琥珀 (隣り合う暖色) が近いが、これはパレットの色相の間隔 (23°) によるもので、パレットは変えていない。
 - 細かい場: スプラット 0.4 倍 (実効 0.2 rMax)、small ぼかし 0.4 倍 (glass より粗く、cell より細かい。粒がくっきり出る)。large ぼかしは縮めない (体の輪郭用)。`threshold` は small の小器官だけに効き、`thresholdScale` (1.6) 倍の実効 2.4 が既定 (殻の弧・小さな器官が出る。ごみは `scopeSpeck` が隠すので高くしなくてよい)。体の輪郭・細胞質は `threshold` を動かしても変わらない。
@@ -204,8 +211,8 @@ scope のスプラットは 0.2 (= 0.4 x 0.5)。粒 (ごみ) 対策のために�
 ## 実装メモ
 
 - `src/organicStyles.js`: スタイル表 (上記)。
-- `src/gpu/shaders/organic.wgsl.js`: `splatWGSL` / `shapeWGSL` / `downsampleWGSL` / `blurWGSL` / `compositeWGSL`。`paperWGSL` (cell / scope の画面固定ノイズ)。`OrganicParams` は 17 個の 4 バイト値 (68 バイト。style / shape だけ u32。fieldW / fieldH / margin は splat と shape の余白付き field の座標用)。フィールド名は config.js の項目名と同じで、JS 側の `ORGANIC_FIELDS` と WGSL の struct の一致は起動時に `assertOrganicLayout` (common.wgsl.js の `assertStructLayout`) が確認する。`BlurParams` は 288 バイト。全画面三角形の頂点シェーダ `FULLSCREEN_VS` は render.wgsl.js のものを fade / blit / organic で共有する。
-- `src/gpu/renderer.js`: `updateOrganicLayout` (field の解像度・σ・縮小段数)、`ensureOrganicPlan` / `buildOrganicPlan` (テクスチャ・パス・バインドグループ)、`drawOrganic`、`writeOrganicUniform` (変わったときだけアップロード)、`writeBlurUniforms`、`writeGaussianTaps`。
+- `src/gpu/shaders/organic.wgsl.js`: `splatWGSL` / `shapeWGSL` / `downsampleWGSL` / `blurWGSL` / `compositeWGSL`。`paperWGSL` (cell / scope の画面固定ノイズ)。`OrganicParams` は 18 個の 4 バイト値 (72 バイト。style / shape だけ u32。fieldW / fieldH / margin は splat と shape の余白付き field の座標用、numTypes は scope の種類の角度用)。フィールド名は config.js の項目名と同じで、JS 側の `ORGANIC_FIELDS` と WGSL の struct の一致は起動時に `assertOrganicLayout` (common.wgsl.js の `assertStructLayout`) が確認する。`BlurParams` は 288 バイト。全画面三角形の頂点シェーダ `FULLSCREEN_VS` は render.wgsl.js のものを fade / blit / organic で共有する。
+- `src/gpu/renderer.js`: `updateOrganicLayout` (field の解像度・σ・縮小段数)、`ensureOrganicPlan` / `buildOrganicPlan` (テクスチャ・パス・バインドグループ)、`drawOrganic`、`writeOrganicUniform` (変わったときだけアップロード)、`updatePalette` (パレットと scope の染色表)、`writeBlurUniforms`、`writeGaussianTaps`。
 - `trails` は organic では無視 (dots に戻したときは従来どおり)。`densityA` は読まない (simulation.js の `needDensity` も無くした。density パスは圧縮の制限が有効なときだけ走る)。
 - 性能の目安 (60,000 粒子、1920x1080、fieldScale 0.5、Intel UHD (内蔵 GPU)、描画 GPU 時間。下記の最適化の前の値): glass ≈ 4.3 ms、cell ≈ 11 ms (ノイズが重い)。dots は 0.5 ms。scope は NVIDIA (Ampere)・1600x900 の HUD の draw gpu で glass ≈ 0.30 ms、scope ≈ 0.58 ms (softLarge の MRT と large 用の縮小列で +0.02 ms。Intel UHD では未計測)。
 - 最適化 (同じ見た目のまま仕事を減らしたもの。swiftshader 上のタイムスタンプで計測、絶対値は実 GPU と違う):

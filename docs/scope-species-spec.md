@@ -52,6 +52,13 @@ scope のときだけ、field / shaped / small / large のチャンネルの意�
 4. 設定・GUI に新しい項目は足さない (既存の `scopeStain` / `scopeVignette` / `scopeSpeck` / `threshold` / `blurLarge` のまま)。
 5. mobile (`organicGl.js`): `SPLAT_VS` / `SHAPE_OCC_FS` / `SOFT_DOWN_FS` / `SCOPE_FS` を同じ変更に。`uStain[]` / `uTransmit[]` を uniform 配列で渡す (16 本、パレット変更時だけ更新)。
 
+実装メモ (フェーズ 1、PC 版。仕様からの変更点):
+
+- 切り替えの AA は `(f - 0.5) / gw` ではなく、e 空間で境界の半直線までの符号付き距離 `side = dot(e, (-sin φ, cos φ))` (φ = `(floor(u) + 1) 2π/N`) を `|dpdx e| + |dpdy e|` で割った px 距離を使う。隣の種類同士では同じ値になり、N = 2 や対蹠の種類 (e が原点を通り f が 0.5 を通らない) でも AA と区切り線が効く。
+- 安全弁の範囲は R の固定値 (0.35, 0.75) ではなく N で正規化した値 (`organic-rendering-spec.md` の scope の節)。固定値だと N = 2 / 3 の正しい境界が灰色になり、N = 10 / 16 では偽の種類を消せない。灰色は同じ輝度ではなく明るい灰色 (淡い染色)。
+- 細胞質の補間の幅は `saturate(side / sin(π/N) + 0.5)` (|e| = 1 で u の幅 0.5 にほぼ等しい)。
+- `stain[]` は uniform に入れているが composite は `transmit[]` だけ読む。
+
 受け入れ (フェーズ 1):
 
 - 2 種類の粒子の塊が接する所で、境界に第三の色相が出ない (パレットの色だけ)。

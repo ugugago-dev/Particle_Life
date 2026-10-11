@@ -11,6 +11,7 @@ import {
     splatWGSL, shapeWGSL, downsampleWGSL, blurWGSL, compositeWGSL, paperWGSL,
 } from './shaders/organic.wgsl.js';
 import { ORGANIC_STYLES, SHAPE_INDEX } from '../organicStyles.js';
+import { buildStainTables, MAX_STAIN_TYPES } from '../stainColor.js';
 
 const BG = { r: 1 / 255, g: 14 / 255, b: 29 / 255, a: 1 };   // style.css の --bg
 const TRAIL_FORMAT = 'rgba16float';  // 8bit だとフェードの丸めで残像が消えきらない
@@ -100,6 +101,12 @@ export class GpuRenderer {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
         this.paletteSource = null;
+        // scope の種類ごとの染色 (WGSL の StainTables = stain[16] + transmit[16])
+        this.stainBuffer = device.createBuffer({
+            label: 'scope stain tables',
+            size: 2 * MAX_STAIN_TYPES * 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
 
         this.trailTexture = null;
         this.trailView = null;
@@ -379,6 +386,7 @@ export class GpuRenderer {
                 { binding: 4, resource: large.view },
                 { binding: 5, resource: (granule ?? small).view },    // cell 以外では読まれない
                 { binding: 6, resource: (paperTex ?? small).view },
+                { binding: 7, resource: { buffer: this.stainBuffer } },    // scope だけ
             ],
         });
 
@@ -439,6 +447,9 @@ export class GpuRenderer {
             data[4 * t + 3] = 1;
         }
         this.device.queue.writeBuffer(this.paletteBuffer, 0, data);
+        const { stain, transmit } = buildStainTables(palette.rgb, palette.numTypes);
+        this.device.queue.writeBuffer(this.stainBuffer, 0, stain);
+        this.device.queue.writeBuffer(this.stainBuffer, stain.byteLength, transmit);
     }
 
     updateParticleGroup(sim) {
@@ -561,7 +572,7 @@ export class GpuRenderer {
         const count = sim.count;
         const layout = this.updateOrganicLayout(org, style, view.rMax, sim.world.height);
         const plan = this.ensureOrganicPlan(layout, style);
-        this.writeOrganicUniform(org, style, view.rMax, sim, layout);
+        this.writeOrganicUniform(org, style, view.rMax, sim, layout, view.palette);
         this.writeBlurUniforms(plan, layout);
         this.updateSplatGroup(sim);
 
@@ -613,7 +624,7 @@ export class GpuRenderer {
         pass.end();
     }
 
-    writeOrganicUniform(org, style, rMax, sim, layout) {
+    writeOrganicUniform(org, style, rMax, sim, layout, palette) {
         const f = this.organicData;
         const u = this.organicU32;
         const world = sim.world;
@@ -628,6 +639,7 @@ export class GpuRenderer {
         f[OF.fieldW] = layout.fw;
         f[OF.fieldH] = layout.fh;
         f[OF.margin] = layout.margin;
+        f[OF.numTypes] = Math.min(Math.max(palette.numTypes, 1), MAX_STAIN_TYPES);
         for (const name of COPIED_PARAMS) f[OF[name]] = org[name];
         f[OF.threshold] *= style.thresholdScale ?? 1;
 

@@ -1,7 +1,7 @@
-// scope スタイルの染色色 (CPU 側)。organic.wgsl.js の stainColor / stainTransmit と同じ式・定数。
-// パレットが変わったときだけ計算し、vec4 配列 (uniform) として GPU へ渡す。DOM / GPU 非依存。
+// scope スタイルの種類ごとの染色色 (CPU 側。docs/scope-species-spec.md)。
+// パレットが変わったときだけ計算し、vec4 配列 (uniform) として GPU へ渡す (PC = renderer.js の updatePalette)。DOM / GPU 非依存。
 
-/** 明視野の背景色 (WGSL の SCOPE_BG と共有する値) */
+/** 明視野の背景色 (organic.wgsl.js の SCOPE_BG へ文字列で埋め込む) */
 export const SCOPE_BG = [0.93, 0.94, 0.88];
 
 export const STAIN_DL = 0.15;       // 染色は種類の色より L を下げる
