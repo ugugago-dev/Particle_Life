@@ -122,10 +122,10 @@ export class GpuRenderer {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
         this.paletteSource = null;
-        // scope の種類ごとの染色 (WGSL の StainTables = stain[16] + transmit[16])
+        // scope の種類ごとの染色の透過率 (WGSL の StainTables = transmit[16])
         this.stainBuffer = device.createBuffer({
             label: 'scope stain tables',
-            size: 2 * MAX_STAIN_TYPES * 16,
+            size: MAX_STAIN_TYPES * 16,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
@@ -471,9 +471,7 @@ export class GpuRenderer {
             data[4 * t + 3] = 1;
         }
         this.device.queue.writeBuffer(this.paletteBuffer, 0, data);
-        const { stain, transmit } = buildStainTables(palette.rgb, palette.numTypes);
-        this.device.queue.writeBuffer(this.stainBuffer, 0, stain);
-        this.device.queue.writeBuffer(this.stainBuffer, stain.byteLength, transmit);
+        this.device.queue.writeBuffer(this.stainBuffer, 0, buildStainTables(palette.rgb, palette.numTypes).transmit);
     }
 
     updateParticleGroup(sim) {

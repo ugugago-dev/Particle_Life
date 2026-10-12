@@ -394,7 +394,7 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
 export const compositeWGSL = ORGANIC_COMMON + FULLSCREEN_VS + /* wgsl */`
 @group(0) @binding(1) var<uniform> O: OrganicParams;
 @group(0) @binding(2) var samp: sampler;
-@group(0) @binding(3) var smallBlur: texture_2d<f32>;     // disk (rgb = 色 x c、scope は rg = 種類の角度の平均ベクトル x c、b = 圧縮した生密度 ρ、a = c)
+@group(0) @binding(3) var smallBlur: texture_2d<f32>;     // disk (rgb = 色 x c、scope は rg = 種類の角度の平均ベクトル x c、b = 圧縮した同種の密度 ρ、a = c)
 @group(0) @binding(4) var largeBlur: texture_2d<f32>;     // ring
 @group(0) @binding(5) var granuleTex: texture_2d<f32>;    // cell だけ
 @group(0) @binding(6) var paperTex: texture_2d<f32>;      // cell / scope だけ
@@ -501,7 +501,7 @@ const SCOPE_EDGE = 0.2;                    // 体の輪郭 (n)
 const SCOPE_GATE = 0.2;                    // scopeSpeck = 1 で小器官に要る n
 const SCOPE_BODY = 0.35;                   // 小器官の輪郭 (m)
 const SCOPE_CYTO = 0.1;                    // 細胞質の吸光度 / scopeStain
-const SCOPE_STAIN_REF = 1.5;               // この scopeStain で密度 1 の染色が stain[] になる
+const SCOPE_STAIN_REF = 1.5;               // この scopeStain で密度 1 の染色が stainColor (stainColor.js) になる
 const SCOPE_LIGHT = vec2f(-0.6, -0.8);     // 光源の向き (左上、画面座標)
 const SCOPE_SLOPE = 3.0;
 const SCOPE_RELIEF = 0.18;
@@ -539,10 +539,9 @@ const SCOPE_CORE_SAT = 0.1;                // 核の彩度の上げ幅
 const SCOPE_FOREIGN_RHO = 0.35;
 const SCOPE_FOREIGN_NEAR = vec2f(0.03, 0.08);
 
-// stainColor.js の buildStainTables (パレットが変わったときだけ書く)
+// stainColor.js の buildStainTables の transmit だけ (パレットが変わったときだけ書く。stain は composite が読まないので送らない)
 struct StainTables {
-  stain: array<vec4f, ${MAX_STAIN_TYPES}>,       // 密度 1 の染色の色 (sRGB)。composite では未使用
-  transmit: array<vec4f, ${MAX_STAIN_TYPES}>,    // min(stain / SCOPE_BG, 1)
+  transmit: array<vec4f, ${MAX_STAIN_TYPES}>,    // min(密度 1 の染色の色 / SCOPE_BG, 1)
 };
 
 // 種類の角度の平均ベクトル e (|e| = 純度) から種類を復元する。i0 / i1 = e を挟む 2 つの種類の中心 (角度順)、
