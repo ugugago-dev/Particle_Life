@@ -558,8 +558,7 @@ export class OrganicGl {
         this.copies = new Float32Array(0);
         this.palette = new Float32Array(MAX_PALETTE * 4);
         this.transmit = new Float32Array(MAX_STAIN_TYPES * 4);    // scope の染色の透過率 (パレットが変わったときだけ作り直す)
-        this.transmitKey = new Float32Array(1 + 3 * MAX_PALETTE);    // [numTypes, palette rgb...] (比べるだけ。毎フレーム文字列を作らない)
-        this.transmitValid = false;
+        this.transmitKey = '';
         this.plan = null;
         this.tapCache = new Map();
     }
@@ -572,8 +571,6 @@ export class OrganicGl {
         const gl = this.gl;
         const targets = [];
         const make = (w, h, format) => {
-        this.copyKey = { version: NaN, count: -1, r: 0, W: 0, H: 0 };    // VBO に入っている周期コピーの条件 { version, count, r, W, H } と個数 (SimClient の version が同じ間は詰め直さない)
-        this.copyN = 0;
             const t = makeTarget(gl, w, h, format);
             targets.push(t);
             return t;
@@ -646,8 +643,6 @@ export class OrganicGl {
             const py = y[i];
             const dx = px < r ? W : px > W - r ? -W : 0;
             const dy = py < r ? H : py > H - r ? -H : 0;
-        const ck = this.copyKey;
-        if (ck.version === sim.version && ck.count === n && ck.r === r && ck.W === W && ck.H === H) return this.copyN;    // VBO は前回のまま
             if (dx === 0 && dy === 0) continue;
             const t = type[i];
             if (dx !== 0) push(px + dx, py, t);
@@ -670,13 +665,6 @@ export class OrganicGl {
     }
 
     fullscreen(target, prog) {
-        // version が NaN (CpuSimulation / fallback) なら次回も一致しないので毎回詰め直す
-        ck.version = sim.version ?? NaN;
-        ck.count = n;
-        ck.r = r;
-        ck.W = W;
-        ck.H = H;
-        this.copyN = count;
         const gl = this.gl;
         gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
         gl.viewport(0, 0, target.w, target.h);
@@ -754,14 +742,10 @@ export class OrganicGl {
         }
         const numTypes = Math.min(Math.max(view.palette.numTypes, 1), MAX_PALETTE);
         if (scope) {
-            const key = this.transmitKey;
-            let same = this.transmitValid && key[0] === numTypes;
-            for (let i = 0; same && i < 3 * numTypes; i++) same = key[1 + i] === pal[i];
-            if (!same) {
+            const key = `${numTypes}:${Array.from(pal.subarray(0, 3 * numTypes)).join(',')}`;
+            if (key !== this.transmitKey) {
                 this.transmit = buildStainTables(pal, numTypes).transmit;
-                key[0] = numTypes;
-                for (let i = 0; i < 3 * numTypes; i++) key[1 + i] = pal[i];
-                this.transmitValid = true;
+                this.transmitKey = key;
             }
         }
         const copies = this.uploadCopies(sim, radius);
