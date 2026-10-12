@@ -89,10 +89,11 @@ export class GpuSimulation {
         if (this.buffers) for (const b of Object.values(this.buffers)) b.destroy();
         this.count = n;
         const m = Math.max(n, 1);
-        const mk = (label, bytes) => device.createBuffer({ label, size: bytes, usage: STORAGE | COPY_SRC | COPY_DST });
+        // A は loadState の書き込みとテスト用ハーネス (label で拾う) の読み戻しに COPY_*。残りは GPU 内だけで使う
+        const mk = (label, bytes, usage = STORAGE) => device.createBuffer({ label, size: bytes, usage });
         this.buffers = {
-            posVelA: mk('posVel A', m * 16),   // vec4f (x, y, vx, vy)
-            metaA: mk('meta A', m * 8),        // vec2<u32> (type, id)
+            posVelA: mk('posVel A', m * 16, STORAGE | COPY_SRC | COPY_DST),   // vec4f (x, y, vx, vy)
+            metaA: mk('meta A', m * 8, STORAGE | COPY_SRC | COPY_DST),        // vec2<u32> (type, id)
             posTypeB: mk('posType B (cell-sorted)', m * 16),  // vec4f (x, y, type, 0)
             velIdB: mk('velId B (cell-sorted)', m * 16),      // vec4f (vx, vy, id, 0)
             posTypeP: mk('posType + pressure (cell-sorted)', m * 16),  // vec4f (x, y, type, pressure)。圧力ありの force が読む
@@ -107,7 +108,8 @@ export class GpuSimulation {
         // リサイズ中に毎フレーム作り直さないよう余裕を持たせる
         const capacity = Math.max(16, Math.ceil(nCells * 1.25));
         this.grid.capacity = capacity;
-        const mk = (label, bytes) => device.createBuffer({ label, size: bytes, usage: STORAGE | COPY_SRC | COPY_DST });
+        // numCellParticles は作成時の 0 と scan のリセットに頼るのでクリア (COPY_DST) は要らない
+        const mk = (label, bytes) => device.createBuffer({ label, size: bytes, usage: STORAGE });
         this.cellBuffers = {
             numCellParticles: mk('numCellParticles', capacity * 4),
             firstCellParticle: mk('firstCellParticle', (capacity + 1) * 4),
