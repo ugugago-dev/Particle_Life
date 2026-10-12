@@ -93,7 +93,6 @@ export class GpuSimulation {
         this.buffers = {
             posVelA: mk('posVel A', m * 16),   // vec4f (x, y, vx, vy)
             metaA: mk('meta A', m * 8),        // vec2<u32> (type, id)
-            densityA: mk('density A', m * 4),  // f32 (デバッグの読み戻し用)
             posTypeB: mk('posType B (cell-sorted)', m * 16),  // vec4f (x, y, type, 0)
             velIdB: mk('velId B (cell-sorted)', m * 16),      // vec4f (vx, vy, id, 0)
             posTypeP: mk('posType + pressure (cell-sorted)', m * 16),  // vec4f (x, y, type, pressure)。圧力ありの force が読む
@@ -138,14 +137,14 @@ export class GpuSimulation {
             layout: pipelines[name].getBindGroupLayout(0),
             entries: [U, ...entries.map((buffer, i) => ({ binding: i + 1, resource: { buffer } }))],
         });
-        const { posVelA, metaA, densityA, posTypeB, velIdB, posTypeP, slot } = buffers;
+        const { posVelA, metaA, posTypeB, velIdB, posTypeP, slot } = buffers;
         this.bindGroups.wrap = bg('wrap', [posVelA]);
         if (!cellBuffers) return;
         const { numCellParticles, firstCellParticle } = cellBuffers;
         this.bindGroups.count = bg('count', [posVelA, numCellParticles, slot]);
         this.bindGroups.scan = bg('scan', [numCellParticles, firstCellParticle]);
         this.bindGroups.scatter = bg('scatter', [posVelA, metaA, slot, firstCellParticle, posTypeB, velIdB]);
-        this.bindGroups.density = bg('density', [posTypeB, firstCellParticle, densityA, posTypeP]);
+        this.bindGroups.density = bg('density', [posTypeB, firstCellParticle, posTypeP]);
         if (rulesBuffer) {
             this.bindGroups.force = bg('force', [posTypeB, velIdB, firstCellParticle, rulesBuffer, posVelA, metaA]);
             const pressureBuffers = [posTypeP, velIdB, firstCellParticle, rulesBuffer, posVelA, metaA];
@@ -172,7 +171,6 @@ export class GpuSimulation {
         if (n > 0) {
             queue.writeBuffer(this.buffers.posVelA, 0, pv);
             queue.writeBuffer(this.buffers.metaA, 0, meta);
-            queue.writeBuffer(this.buffers.densityA, 0, new Float32Array(n));
         }
     }
 
@@ -392,68 +390,5 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         pass.setPipeline(pipelines[force]);
         pass.setBindGroup(0, bindGroups[force]);
         pass.dispatchWorkgroups(ceilDiv(count, FORCE_WORKGROUP));
-    }
-
-    /**
-     * デバッグ用。density は圧縮の制限が有効なときだけ更新される。
-     * @returns {Promise<{count:number, x:Float32Array, y:Float32Array, vx:Float32Array, vy:Float32Array,
-     *                    type:Uint32Array, id:Uint32Array, density:Float32Array}>}
-     */
-    async readState() {
-        const { device, count } = this;
-        const n = count;
-        const pvBytes = n * 16;
-        const metaBytes = n * 8;
-        const densBytes = n * 4;
-        const staging = device.createBuffer({
-            size: Math.max(16, pvBytes + metaBytes + densBytes),
-            usage: GPUBufferUsage.MAP_READ | COPY_DST,
-        });
-        const enc = device.createCommandEncoder();
-        if (n > 0) {
-            enc.copyBufferToBuffer(this.buffers.posVelA, 0, staging, 0, pvBytes);
-            enc.copyBufferToBuffer(this.buffers.metaA, 0, staging, pvBytes, metaBytes);
-            enc.copyBufferToBuffer(this.buffers.densityA, 0, staging, pvBytes + metaBytes, densBytes);
-        }
-        device.queue.submit([enc.finish()]);
-        await staging.mapAsync(GPUMapMode.READ);
-        const raw = staging.getMappedRange().slice(0);
-        staging.unmap();
-        staging.destroy();
-
-        const pv = new Float32Array(raw, 0, n * 4);
-        const meta = new Uint32Array(raw, pvBytes, n * 2);
-        const density = new Float32Array(raw, pvBytes + metaBytes, n);
-        const out = {
-            count: n,
-            x: new Float32Array(n), y: new Float32Array(n),
-            vx: new Float32Array(n), vy: new Float32Array(n),
-            type: new Uint32Array(n), id: new Uint32Array(n),
-            density: density.slice(),
-        };
-        for (let i = 0; i < n; i++) {
-            out.x[i] = pv[4 * i];
-            out.y[i] = pv[4 * i + 1];
-            out.vx[i] = pv[4 * i + 2];
-            out.vy[i] = pv[4 * i + 3];
-            out.type[i] = meta[2 * i];
-            out.id[i] = meta[2 * i + 1];
-        }
-        return out;
-    }
-
-    /** デバッグ用: 直近の step の firstCellParticle (nCells + 1 個)。 */
-    async readFirstCellParticle() {
-        const { device } = this;
-        const bytes = (this.grid.nCells + 1) * 4;
-        const staging = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | COPY_DST });
-        const enc = device.createCommandEncoder();
-        enc.copyBufferToBuffer(this.cellBuffers.firstCellParticle, 0, staging, 0, bytes);
-        device.queue.submit([enc.finish()]);
-        await staging.mapAsync(GPUMapMode.READ);
-        const out = new Uint32Array(staging.getMappedRange().slice(0));
-        staging.unmap();
-        staging.destroy();
-        return out;
     }
 }
