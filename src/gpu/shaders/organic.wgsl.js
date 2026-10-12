@@ -683,32 +683,12 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
   col = mix(col, line, 0.7 * saturate(0.6 * w + 0.5 - abs(dist + 1.6 * w)) * fade);
   col = mix(col, vec3f(0.32, 0.33, 0.33), 0.65 * saturate(0.7 * w + 0.5 - abs(dist)) * fade);
 
-  // 小器官: 隣の種類との切り替え (約 1 px の AA)
-  let dsw = sp.side / max(gradE, 1e-5);                        // 切り替えからの px (i1 側が正)
-  let T0 = stains.transmit[sp.i0].rgb;
-  let T1 = stains.transmit[sp.i1].rgb;
-  let Town = mix(T0, T1, saturate(dsw + 0.5));
-  let sepOwn = select(0.0, 1.0, sp.i0 != sp.i1) * saturate(SCOPE_SEP_W * w + 0.5 - abs(dsw));
-  let sepColOwn = 0.5 * (pow(T0, vec3f(k * 2.2)) + pow(T1, vec3f(k * 2.2)));
-  // 混合域 (keep < 1): 両側の純粋な小器官 A / B の種類で塗る。切り替えは e 空間で A と B の垂直二等分線 (原点を通る) までの
-  // 符号付き距離 (隣の種類なら上の side と同じ)。純粋な画素 (keep = 1) は従来どおり (タップも読まない)
+  // 混合域 (keep < 1): 両側の純粋な小器官 A / B の種類で塗る (下)。純粋な画素 (keep = 1) は従来どおり (タップも読まない)
   let t0 = select(sp.i0, sp.i1, sp.side > 0.0);
   var sides = Sides(t0, t0, 0.0, -1e3, 0.0, 0.0);
   if (sp.keep < 1.0 && m > SCOPE_SIDE_M.x) { sides = pureSides(uv, es, sp); }   // 微分は使わない (分岐は一様でない)
-  let iA = sides.iA;
-  let iB = sides.iB;
-  let ab = speciesDir(iB) - speciesDir(iA);
-  let useB = select(0.0, 1.0, iA != iB && sides.affB > -1e2);
-  // A と B の切り替えからの px (B 側が正)。罰則が無ければ e 空間で A と B の垂直二等分線 (原点を通る) までの距離 (隣の種類なら上の side と同じ)
-  let dAB = (sides.affB - sides.affA) / max(length(ab), 1e-3) / max(gradE, 1e-5);
-  let TA = stains.transmit[iA].rgb;
-  let TB = stains.transmit[iB].rgb;
-  let Tpair = mix(TA, TB, saturate(dAB + 0.5) * useB);
-  let sepPair = useB * saturate(SCOPE_SEP_W * w + 0.5 - abs(dAB));
-  let sepColPair = 0.5 * (pow(TA, vec3f(k * 2.2)) + pow(TB, vec3f(k * 2.2)));
   // 自分の復元へ戻すのは keep が 1 に近い所だけ (keep の途中では自分の復元が隣の偽の種類と区切り線を出す)
   let ownW = smoothstep(SCOPE_SIDE_OWN.x, SCOPE_SIDE_OWN.y, sp.keep);
-  let T = mix(Tpair, Town, ownW);
   // 周りが純粋な小器官で占められていれば混合域も不透明 (接触帯)。多種類の混ざり (ガスの塊) は従来どおり薄く。隙間は m の cover が残す
   let contact = smoothstep(SCOPE_SIDE_COV.x, SCOPE_SIDE_COV.y, sides.cov) * smoothstep(SCOPE_SIDE_SHARE.x, SCOPE_SIDE_SHARE.y, sides.share);
   let keepEff = max(sp.keep, contact);
@@ -719,44 +699,72 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
   // 小器官のゲートは減衰しない l.a で判定する (異種を除いた分だけ壁が縮んでも、小器官の見え方は変えない)
   let nGate = select(aaStep(l.a + (noise.g - 0.5) * 0.08, SCOPE_GATE * O.scopeSpeck), 1.0, O.scopeSpeck <= 0.0);
   let rhoGate = aaStep(rho, SCOPE_FOREIGN_RHO);
-  let dom = dominantSpecies(l);
-  let near = smoothstep(SCOPE_FOREIGN_NEAR.x, SCOPE_FOREIGN_NEAR.y, nb);    // 遠い裾の中の塊は対象外 (何も無い所の塊と同じ扱い)
-  let foreignS = select(0.0, dom.y * near * saturate(circDist(speciesCoord(es), dom.x)), O.scopeIsolation > 0.0);
+  var foreignS = 0.0;
+  if (O.scopeIsolation > 0.0) {
+    let dom = dominantSpecies(l);
+    let near = smoothstep(SCOPE_FOREIGN_NEAR.x, SCOPE_FOREIGN_NEAR.y, nb);    // 遠い裾の中の塊は対象外 (何も無い所の塊と同じ扱い)
+    foreignS = dom.y * near * saturate(circDist(speciesCoord(es), dom.x));
+  }
   let gate = max(nGate, foreignS * rhoGate);
   let pure = gate * mix(SCOPE_MIX_COVER, 1.0, keepEff);        // 純粋な側の無い混合域 (多種類の混ざり) だけ薄く: 下の細胞質・背景が見える
   let cover = saturate(d + 0.5) * pure;
   col = mix(col, line, 0.4 * saturate(0.5 * w + 0.5 - abs(d + 1.5 * w)) * pure);
 
-  let e = 1.0 / vec2f(textureDimensions(smallBlur));
-  let g = vec2f(
-    textureSampleLevel(smallBlur, samp, uv + vec2f(e.x, 0.0), 0.0).a - textureSampleLevel(smallBlur, samp, uv - vec2f(e.x, 0.0), 0.0).a,
-    textureSampleLevel(smallBlur, samp, uv + vec2f(0.0, e.y), 0.0).a - textureSampleLevel(smallBlur, samp, uv - vec2f(0.0, e.y), 0.0).a);
-  let tilt = -dot(g, SCOPE_LIGHT) * SCOPE_SLOPE;               // 光に面した縁が正
-  let nrm = normalize(vec3f(-g * SCOPE_SLOPE, 1.0));
-  let spec = pow(saturate(dot(nrm, normalize(vec3f(SCOPE_LIGHT * 0.5, 1.0)))), 48.0);
+  // ここから下は小器官の中 (cover > 0) だけ: 染色・レリーフ・輪郭・区切り線はどれも cover 倍で混ぜるので、外では col が変わらない。
+  // 微分は上で取ってある (分岐は一様でない)
+  if (cover > 0.0) {
+    // 小器官: 隣の種類との切り替え (約 1 px の AA)
+    let dsw = sp.side / max(gradE, 1e-5);                        // 切り替えからの px (i1 側が正)
+    let T0 = stains.transmit[sp.i0].rgb;
+    let T1 = stains.transmit[sp.i1].rgb;
+    let Town = mix(T0, T1, saturate(dsw + 0.5));
+    let sepOwn = select(0.0, 1.0, sp.i0 != sp.i1) * saturate(SCOPE_SEP_W * w + 0.5 - abs(dsw));
+    let sepColOwn = 0.5 * (pow(T0, vec3f(k * 2.2)) + pow(T1, vec3f(k * 2.2)));
+    // 混合域: 両側の純粋な小器官 A / B の種類の切り替え
+    let iA = sides.iA;
+    let iB = sides.iB;
+    let ab = speciesDir(iB) - speciesDir(iA);
+    let useB = select(0.0, 1.0, iA != iB && sides.affB > -1e2);
+    // A と B の切り替えからの px (B 側が正)。罰則が無ければ e 空間で A と B の垂直二等分線 (原点を通る) までの距離 (隣の種類なら上の side と同じ)
+    let dAB = (sides.affB - sides.affA) / max(length(ab), 1e-3) / max(gradE, 1e-5);
+    let TA = stains.transmit[iA].rgb;
+    let TB = stains.transmit[iB].rgb;
+    let Tpair = mix(TA, TB, saturate(dAB + 0.5) * useB);
+    let sepPair = useB * saturate(SCOPE_SEP_W * w + 0.5 - abs(dAB));
+    let sepColPair = 0.5 * (pow(TA, vec3f(k * 2.2)) + pow(TB, vec3f(k * 2.2)));
+    let T = mix(Tpair, Town, ownW);
 
-  let thick = mix(0.7, 1.0, smoothstep(0.15, 0.85, nb));      // 大きな塊ほど厚い
-  // 密度 ρ: 薄い所は淡く (色ごとの指数を下げる)。指数が 1 を超えると色相が動く (橙が赤へ) ので、
-  // 濃い所の上乗せと核の帯は透過率の輝度の累乗 (スカラー) で暗くする
-  // scopeDensity = 0 で dens = 1、deep = core = 0 (密度を使わない)
-  let dens = mix(1.0, SCOPE_DENS_BASE + SCOPE_DENS_GAIN * rho, O.scopeDensity);
-  let big = smoothstep(SCOPE_CORE_N.x, SCOPE_CORE_N.y, nb);     // 大きな細胞だけ (小さな密な塊は暗くしない)
-  let core = O.scopeDensity * smoothstep(SCOPE_CORE_RHO.x, SCOPE_CORE_RHO.y, rho) * big;
-  let deep = SCOPE_DEEP * max(dens - 1.0, 0.0) * big;
-  let lt = luma(T);
-  var body = col * pow(T, vec3f(k * m * thick * (1.0 + 1.2 * (noise.r - 0.5) + 1.0 * (noise.b - 0.5)) * min(dens, 1.0)));
-  body *= pow(lt, k * (deep + SCOPE_CORE * core));
-  body = max(mix(vec3f(luma(body)), body, 1.0 + SCOPE_CORE_SAT * core), vec3f(0.0));
-  body *= 1.0 + SCOPE_RELIEF * clamp(tilt, -1.0, 1.0);
-  body += SCOPE_SPEC * spec;
-  let ring = cover * (1.0 - saturate(d - 1.3 * w + 0.5));
-  let outline = col * pow(T, vec3f(k * 2.2)) * 0.6 * pow(lt, k * deep);
-  // 種類の区切り線: 接する別種の小器官を別の物に見せる (色 = 両側の輪郭の色の平均を暗く)
-  let sepCol = col * mix(sepColPair, sepColOwn, ownW) * 0.5;
-  let sep = SCOPE_SEP_ALPHA * cover * mix(sepPair, sepOwn, ownW);
-  col = mix(col, body, cover);
-  col = mix(col, sepCol, sep);
-  col = mix(col, outline, ring);
+    let e = 1.0 / vec2f(textureDimensions(smallBlur));
+    let g = vec2f(
+      textureSampleLevel(smallBlur, samp, uv + vec2f(e.x, 0.0), 0.0).a - textureSampleLevel(smallBlur, samp, uv - vec2f(e.x, 0.0), 0.0).a,
+      textureSampleLevel(smallBlur, samp, uv + vec2f(0.0, e.y), 0.0).a - textureSampleLevel(smallBlur, samp, uv - vec2f(0.0, e.y), 0.0).a);
+    let tilt = -dot(g, SCOPE_LIGHT) * SCOPE_SLOPE;               // 光に面した縁が正
+    let nrm = normalize(vec3f(-g * SCOPE_SLOPE, 1.0));
+    let spec = pow(saturate(dot(nrm, normalize(vec3f(SCOPE_LIGHT * 0.5, 1.0)))), 48.0);
+
+    let thick = mix(0.7, 1.0, smoothstep(0.15, 0.85, nb));      // 大きな塊ほど厚い
+    // 密度 ρ: 薄い所は淡く (色ごとの指数を下げる)。指数が 1 を超えると色相が動く (橙が赤へ) ので、
+    // 濃い所の上乗せと核の帯は透過率の輝度の累乗 (スカラー) で暗くする
+    // scopeDensity = 0 で dens = 1、deep = core = 0 (密度を使わない)
+    let dens = mix(1.0, SCOPE_DENS_BASE + SCOPE_DENS_GAIN * rho, O.scopeDensity);
+    let big = smoothstep(SCOPE_CORE_N.x, SCOPE_CORE_N.y, nb);     // 大きな細胞だけ (小さな密な塊は暗くしない)
+    let core = O.scopeDensity * smoothstep(SCOPE_CORE_RHO.x, SCOPE_CORE_RHO.y, rho) * big;
+    let deep = SCOPE_DEEP * max(dens - 1.0, 0.0) * big;
+    let lt = luma(T);
+    var body = col * pow(T, vec3f(k * m * thick * (1.0 + 1.2 * (noise.r - 0.5) + 1.0 * (noise.b - 0.5)) * min(dens, 1.0)));
+    body *= pow(lt, k * (deep + SCOPE_CORE * core));
+    body = max(mix(vec3f(luma(body)), body, 1.0 + SCOPE_CORE_SAT * core), vec3f(0.0));
+    body *= 1.0 + SCOPE_RELIEF * clamp(tilt, -1.0, 1.0);
+    body += SCOPE_SPEC * spec;
+    let ring = cover * (1.0 - saturate(d - 1.3 * w + 0.5));
+    let outline = col * pow(T, vec3f(k * 2.2)) * 0.6 * pow(lt, k * deep);
+    // 種類の区切り線: 接する別種の小器官を別の物に見せる (色 = 両側の輪郭の色の平均を暗く)
+    let sepCol = col * mix(sepColPair, sepColOwn, ownW) * 0.5;
+    let sep = SCOPE_SEP_ALPHA * cover * mix(sepPair, sepOwn, ownW);
+    col = mix(col, body, cover);
+    col = mix(col, sepCol, sep);
+    col = mix(col, outline, ring);
+  }
 
   col *= 1.0 + 0.16 * (noise.r - 0.5);
 
