@@ -76,12 +76,16 @@ fn circDist(a: f32, b: f32) -> f32 {
 const SCOPE_ISO_R = vec2f(0.55, 0.85);
 const SCOPE_ISO_U = vec2f(0.1, 0.25);
 
+// pur = |e|、u = speciesCoord(e) (composite は decodeSpecies で求めた値を渡す)
+fn dominantOf(pur: f32, u: f32) -> vec2f {
+  let D = round(u);
+  let pure = smoothstep(SCOPE_ISO_R.x, SCOPE_ISO_R.y, pur) * (1.0 - smoothstep(SCOPE_ISO_U.x, SCOPE_ISO_U.y, abs(u - D)));
+  return vec2f(D, pure);
+}
+
 fn dominantSpecies(l: vec4f) -> vec2f {
   let e = l.rg / max(l.a, EPS);
-  let u = speciesCoord(e);
-  let D = round(u);
-  let pure = smoothstep(SCOPE_ISO_R.x, SCOPE_ISO_R.y, length(e)) * (1.0 - smoothstep(SCOPE_ISO_U.x, SCOPE_ISO_U.y, abs(u - D)));
-  return vec2f(D, pure);
+  return dominantOf(length(e), speciesCoord(e));
 }
 `;
 
@@ -545,12 +549,15 @@ struct StainTables {
 };
 
 // 種類の角度の平均ベクトル e (|e| = 純度) から種類を復元する。i0 / i1 = e を挟む 2 つの種類の中心 (角度順)、
-// side = 2 つの境界 (中点の角度の半直線) までの e 空間の符号付き距離 (i1 側が正)、keep = 彩度を残す割合
+// side = 2 つの境界 (中点の角度の半直線) までの e 空間の符号付き距離 (i1 側が正)、keep = 彩度を残す割合、
+// u = 連続な種類座標 (speciesCoord と同じ値)、pur = |e|
 struct Species {
   i0: i32,
   i1: i32,
   side: f32,
   keep: f32,
+  u: f32,
+  pur: f32,
 };
 
 fn decodeSpecies(e: vec2f) -> Species {
@@ -559,8 +566,10 @@ fn decodeSpecies(e: vec2f) -> Species {
   let ang = TAU / N;
   let pur = length(e);
   let ee = select(e, vec2f(1.0, 0.0), pur < 1e-6);          // atan2(0, 0) を避ける
-  let fl = floor(atan2(ee.y, ee.x) / ang - 0.5);           // 連続な種類座標 u の整数部
   var sp: Species;
+  sp.u = atan2(ee.y, ee.x) / ang - 0.5;
+  sp.pur = pur;
+  let fl = floor(sp.u);                                     // 連続な種類座標 u の整数部
   sp.i0 = ((i32(fl) % ni) + ni) % ni;
   sp.i1 = (sp.i0 + 1) % ni;
   let phi = (fl + 1.0) * ang;
@@ -701,9 +710,9 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
   let rhoGate = aaStep(rho, SCOPE_FOREIGN_RHO);
   var foreignS = 0.0;
   if (O.scopeIsolation > 0.0) {
-    let dom = dominantSpecies(l);
+    let dom = dominantOf(spl.pur, spl.u);                      // = dominantSpecies(l) (atan2 は decodeSpecies のものを使う)
     let near = smoothstep(SCOPE_FOREIGN_NEAR.x, SCOPE_FOREIGN_NEAR.y, nb);    // 遠い裾の中の塊は対象外 (何も無い所の塊と同じ扱い)
-    foreignS = dom.y * near * saturate(circDist(speciesCoord(es), dom.x));
+    foreignS = dom.y * near * saturate(circDist(sp.u, dom.x));
   }
   let gate = max(nGate, foreignS * rhoGate);
   let pure = gate * mix(SCOPE_MIX_COVER, 1.0, keepEff);        // 純粋な側の無い混合域 (多種類の混ざり) だけ薄く: 下の細胞質・背景が見える
