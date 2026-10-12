@@ -388,7 +388,14 @@ runCase('cellsPerRMax 3', { seed: 23, N, numTypes: 5, width: 0.46, initSpeed: 0.
     both((s) => s.assignTypes(5, makeRng(53)));
     fw.deliverAll();
     check(client.snapshots > 0 && same(client.type, direct.type), 'SimClient: stale snapshot shown after assignTypes');
+    // version: 配列の中身が変わる操作で増え、何も変わらないとき (step の依頼だけ) は同じ (描画側が再アップロードを省く)
+    const v0 = client.version;
+    both((s) => s.step(params, null, 1));
+    check(client.version === v0, 'SimClient: version changed without new data');
+    fw.deliverAll();
+    check(client.version === v0 + 1, 'SimClient: version not bumped by snapshot');
     both((s) => s.setWorld(0.5, 1));
+    check(client.version === v0 + 2, 'SimClient: version not bumped by setWorld');
     both((s) => s.setRules(new RuleMatrix(5, makeRng(54))));
     both((s) => s.step(params, pointer, 1));
     fw.deliverAll();

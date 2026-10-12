@@ -145,6 +145,8 @@ export class GlRenderer {
         this.particleVao = gl.createVertexArray();
         this.particleVbo = gl.createBuffer();
         this.vboCapacity = 0;                  // 粒子数
+        this.uploadedVersion = NaN;            // VBO に入っている sim.version (NaN = 無い / 比べられない)
+        this.uploadedCount = 0;
         this.emptyVao = gl.createVertexArray();   // attribute なしの描画用
 
         this.trailTex = null;
@@ -239,6 +241,9 @@ export class GlRenderer {
     uploadParticles(sim) {
         const gl = this.gl;
         const n = sim.count;
+        // SimClient は snapshot が届くまで中身が同じ (version)。描画の方が速いとき・一時停止中の詰め直しと転送を省く
+        const version = sim.version ?? NaN;    // version を持たない CpuSimulation は毎回アップロード
+        if (version === this.uploadedVersion && n === this.uploadedCount && n <= this.vboCapacity) return;
         if (this.scratch.length < n * 3) this.scratch = new Float32Array(n * 3);
         const s = this.scratch;
         const { x, y, type } = sim;
@@ -257,6 +262,8 @@ export class GlRenderer {
             gl.vertexAttribDivisor(0, 1);
         }
         gl.bufferSubData(gl.ARRAY_BUFFER, 0, s, 0, n * 3);
+        this.uploadedVersion = version;
+        this.uploadedCount = n;
     }
 
     drawParticles(sim, view) {
