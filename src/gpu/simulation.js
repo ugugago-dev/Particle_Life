@@ -1,5 +1,5 @@
 // Particle Life の GPU 版。A = 現在の状態 (描画も読む)、B = scatter でセル順に並べ替えた近傍ループ用のコピー (force は B -> A)
-// 物理は legacy/js-cpu の simulation.js と同じ (f32 なので下位桁だけ違う)
+// 物理は src/mobile/cpuSimulation.js (CPU 版) と同じ (f32 なので下位桁だけ違う)
 
 import { createShaderModule, withErrorScope } from './device.js';
 import { PARAMS_FLOATS, PARAMS_STRUCT_FIELDS, assertParamsLayout } from './shaders/common.wgsl.js';
