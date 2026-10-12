@@ -235,9 +235,9 @@ scope のスプラットは 0.2 (= 0.4 x 0.5)。粒 (ごみ) 対策のために�
   - splat の周期境界を「粒子 x 4 instance」から「余白付き field + shape での折り返し」に: 頂点シェーダの実行が 1 粒子 24 回 -> 4 回 (strip 込み)。splat の時間 1/3。
   - cell の画面固定ノイズを焼く: composite の画素ごとのハッシュ計算 (最大 32 回) が textureLoad 1 回に。
   - 四角形 (dots / splat / ポインタ円) を triangle-list の 6 頂点から triangle-strip の 4 頂点に。
-  - (画素単位で同じ画のまま仕事を減らしたもの。swiftshader の壁時計では差が雑音 (±10% 程度) に埋もれて測れなかったので、減らした仕事の量だけ記す)
+  - (画素単位で同じ画のまま仕事を減らしたもの。swiftshader では壁時計でもパスごとのタイムスタンプでも差が雑音に埋もれて測れなかった (scope の composite の中央値 253 -> 254 ms、同じ回の変えていない glass の composite が 211 -> 235 ms と揺れる) ので、減らした仕事の量だけ記す。実 GPU では未計測)
     - RenderParams も OrganicParams と同じく前回とビットで比べて変わったときだけ送る。organic の中間パスの `beginRenderPass` の記述は plan を作るときに作って使い回す (毎フレームの割り当てなし)。
-    - scope の composite: 小器官の染色・レリーフ (small の 4 回のサンプル)・輪郭・区切り線は `cover > 0` の画素 (既定のシーンで画面の約 11%) だけ計算する (どれも `cover` 倍で混ぜるので外の画素では値が変わらない。微分は分岐の前で取る)。異種の塊のゲートは `scopeIsolation > 0` のときだけ、その atan2 は `decodeSpecies` のものを使う。`decodeSpecies` / `speciesSplit` の numTypes だけで決まる値 (cos 2 回・sin 1 回) は画素ごとに 1 回 (`SK`)。
+    - scope の composite: 小器官の染色・レリーフ (small の 4 回のサンプル)・輪郭・区切り線は `cover > 0` の画素 (既定のシーンで画面の約 11%) だけ計算する (どれも `cover` 倍で混ぜるので外の画素では値が変わらない。微分は分岐の前で取る)。区切り線・輪郭の色 (pow) はさらにその線の上 (`sep > 0` / `ring > 0`) だけ、核・濃染の暗くする処理は `scopeDensity > 0` のときだけ。異種の塊のゲートは `scopeIsolation > 0` のときだけ、その atan2 は `decodeSpecies` のものを使う。`decodeSpecies` / `speciesSplit` の numTypes だけで決まる値 (cos 2 回・sin 1 回) は画素ごとに 1 回 (`SK`)。
     - `StainTables` は composite が読む `transmit` だけ (256 バイト)。
 - 周期境界: splat の余白の折り返しとブラーの repeat サンプラで、画面の端でも輪郭が途切れない。縮小 (downsample) だけは端をクランプする (奇数サイズのときの最後の 1 テクセルだけ影響)。
   余白は field の大きさで頭打ち (スプラット半径が field より大きい極端な設定では 1 回分しか折り返さない。以前の 4 コピー方式と同じ)。
