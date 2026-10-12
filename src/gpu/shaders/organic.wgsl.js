@@ -560,10 +560,34 @@ struct Species {
   pur: f32,
 };
 
-fn decodeSpecies(e: vec2f) -> Species {
+// decodeSpecies / speciesSplit が使う numTypes だけで決まる値。画素ごとに最大 18 回呼ぶので、scopeStyle の先頭で 1 回だけ計算して SK に置く
+struct SpeciesConsts {
+  ni: i32,
+  ang: f32,       // 2π / N
+  keepLo: f32,    // keep の smoothstep の範囲 (純度 |e|)
+  keepHi: f32,
+  splitW: f32,    // speciesSplit の幅 (sin(π/N)、下限 0.1)
+};
+
+var<private> SK: SpeciesConsts;
+
+fn speciesConsts() -> SpeciesConsts {
   let N = max(O.numTypes, 1.0);
-  let ni = i32(N);
-  let ang = TAU / N;
+  var k: SpeciesConsts;
+  k.ni = i32(N);
+  k.ang = TAU / N;
+  let h = PI / max(N, 2.0);                                 // N = 1 は 2 として扱う (常に keep = 1)
+  let a = cos(2.0 * h);
+  let b = cos(h);
+  k.keepLo = min(mix(a, b, SCOPE_PURITY_LO), SCOPE_PURITY_CAP_LO);
+  k.keepHi = min(mix(a, b, SCOPE_PURITY_HI), SCOPE_PURITY_CAP_HI);
+  k.splitW = max(sin(min(PI / N, 0.5 * PI)), 0.1);
+  return k;
+}
+
+fn decodeSpecies(e: vec2f) -> Species {
+  let ni = SK.ni;
+  let ang = SK.ang;
   let pur = length(e);
   let ee = select(e, vec2f(1.0, 0.0), pur < 1e-6);          // atan2(0, 0) を避ける
   var sp: Species;
@@ -574,10 +598,7 @@ fn decodeSpecies(e: vec2f) -> Species {
   sp.i1 = (sp.i0 + 1) % ni;
   let phi = (fl + 1.0) * ang;
   sp.side = dot(e, vec2f(-sin(phi), cos(phi)));
-  let h = PI / max(N, 2.0);                                 // N = 1 は 2 として扱う (常に keep = 1)
-  let a = cos(2.0 * h);
-  let b = cos(h);
-  sp.keep = smoothstep(min(mix(a, b, SCOPE_PURITY_LO), SCOPE_PURITY_CAP_LO), min(mix(a, b, SCOPE_PURITY_HI), SCOPE_PURITY_CAP_HI), pur);
+  sp.keep = smoothstep(SK.keepLo, SK.keepHi, pur);
   return sp;
 }
 
@@ -596,13 +617,12 @@ struct Sides {
 
 // decodeSpecies の side から i1 の割合 (種類の中心で 0 / 1、境界で 0.5。細胞質の補間と同じ幅)
 fn speciesSplit(side: f32) -> f32 {
-  return saturate(side / max(sin(min(PI / max(O.numTypes, 1.0), 0.5 * PI)), 0.1) + 0.5);
+  return saturate(side / SK.splitW + 0.5);
 }
 
 fn pureSides(uv: vec2f, e: vec2f, sp: Species) -> Sides {
-  var best: array<f32, ${MAX_STAIN_TYPES}>;
+  var best: array<f32, ${MAX_STAIN_TYPES}>;    // WGSL の var は 0 で初期化される
   var sum: array<f32, ${MAX_STAIN_TYPES}>;
-  for (var i = 0; i < ${MAX_STAIN_TYPES}; i++) { best[i] = 0.0; sum[i] = 0.0; }
   let w0 = speciesSplit(sp.side);
   best[sp.i0] = sp.keep * (1.0 - w0);
   best[sp.i1] = max(best[sp.i1], sp.keep * w0);
@@ -678,14 +698,14 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
   // 種類: 微分は分岐の外で先に取る
   let es = s.rg / max(s.a, EPS);
   let gradE = length(dpdx(es)) + length(dpdy(es));            // 1 px あたりの e の変化
+  SK = speciesConsts();
   let sp = decodeSpecies(es);
   let spl = decodeSpecies(l.rg / max(l.a, EPS));
 
   var col = SCOPE_BG * (1.0 + 0.05 * (noise.g - 0.5));
 
   // 細胞質: 隣の種類との線形補間 (u の幅 0.5 の柔らかい切り替え)
-  let hl = sin(min(PI / max(O.numTypes, 1.0), 0.5 * PI));
-  let Tl = desaturate(mix(stains.transmit[spl.i0].rgb, stains.transmit[spl.i1].rgb, saturate(spl.side / max(hl, 0.1) + 0.5)), spl.keep);
+  let Tl = desaturate(mix(stains.transmit[spl.i0].rgb, stains.transmit[spl.i1].rgb, speciesSplit(spl.side)), spl.keep);
   let dist = (n - SCOPE_EDGE) / max(fwidth(n), 1e-4);          // 体の輪郭からの px (内側が正)
   col *= mix(vec3f(1.0), pow(Tl, vec3f(SCOPE_CYTO * O.scopeStain)), saturate(dist + 0.5));
   let fade = smoothstep(0.002, 0.005, fwidth(n));              // 勾配が弱い所 (平らな頂上・くびれ) では壁を出さない
