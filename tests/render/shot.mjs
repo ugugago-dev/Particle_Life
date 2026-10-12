@@ -2,6 +2,7 @@
 // Headless screenshot harness for the organic render styles (PC WebGPU + mobile WebGL2). No src/ changes needed.
 //   PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers node tests/render/shot.mjs [--out DIR] [--target pc|mobile|all]
 //        [--steps N] [--preset 1..6] [--seed S] [--styles scope,glass,cell,dots] [--particles N] [--mobile-particles N] [--no-fixture] [--verbose]
+//        [--set key=value,key=value]   (overrides render params on the live params object, e.g. --set scopeDensity=1)
 //   node tests/render/compare.mjs DIR_A DIR_B   (pixel diff of two output dirs)
 // Playwright is NOT a repo dependency: it is found via $PLAYWRIGHT_MODULE_DIR, /opt/node-tools/node_modules or `npm root -g`.
 //
@@ -47,6 +48,10 @@ const seed = Number(args.seed ?? 12345);
 const styles = (args.styles ?? 'scope,glass,cell,dots').split(',');
 const pcParticles = Number(args.particles ?? 10000); // 0 = config default (60000: ~1.6 s per step under swiftshader)
 const mobileParticles = Number(args['mobile-particles'] ?? 5000);
+const overrides = Object.fromEntries((args.set ?? '').split(',').filter(Boolean).map((kv) => {
+    const [k, v] = kv.split('=');
+    return [k, v === 'true' ? true : v === 'false' ? false : Number.isNaN(Number(v)) ? v : Number(v)];
+}));
 fs.mkdirSync(out, { recursive: true });
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.wgsl': 'text/plain', '.json': 'application/json' };
@@ -187,14 +192,15 @@ async function run(name, launchOpts, ctxOpts, url, abortPred) {
         }
     }
     for (const style of styles) {
-        const { w, h, b64 } = await page.evaluate(async (st) => {
+        const { w, h, b64 } = await page.evaluate(async ([st, over]) => {
             const p = window.__params;
+            Object.assign(p, over);
             if (st === 'dots') p.renderMode = 'dots'; else { p.renderMode = 'organic'; p.organicStyle = st; }
             window.__frames(3); // sim is paused, so the state does not move; extra frames just settle resize/params
             const r = window.__sync?.(); // WebGL: finish() is synchronous -> no await before the readback
             if (r) await r;
             return await (window.__readback ?? window.__glReadback)();
-        }, style);
+        }, [style, overrides]);
         const file = path.join(out, `${name}-${style}.png`);
         fs.writeFileSync(file, encodePng(w, h, Buffer.from(b64, 'base64')));
         console.log('wrote', path.relative(process.cwd(), file));

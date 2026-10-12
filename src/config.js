@@ -52,6 +52,7 @@ export const defaults = Object.freeze({
     scopeVignette: 0.6,      // scope: eyepiece vignette (0 = flat illumination)
     scopeSpeck: 1,           // scope: bodies need this much cell around them to show (0 = show every body, 1 = only inside a cell wall)
     scopeIsolation: 0.85,    // scope: other-type particles near a pure cell do not push its wall and show as separate dots (0 = off)
+    scopeDensity: 0,         // scope: same-type density deepens the stain and darkens the core of big cells (0 = off)
     showParticles: false,    // faint dots on top of the organic look
 });
 

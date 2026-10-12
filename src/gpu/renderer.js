@@ -25,7 +25,7 @@ const MAX_BLUR_LEVEL = 6;
 
 const OF = Object.fromEntries(ORGANIC_FIELDS.map((name, i) => [name, i]));
 // config.js から同名でコピーする項目 (残りは writeOrganicUniform で計算)
-const COPIED_PARAMS = ['fieldGain', 'threshold', 'nucleusThreshold', 'speciesTint', 'rimStrength', 'coreThreshold', 'scopeStain', 'scopeVignette', 'scopeSpeck', 'scopeIsolation'];
+const COPIED_PARAMS = ['fieldGain', 'threshold', 'nucleusThreshold', 'speciesTint', 'rimStrength', 'coreThreshold', 'scopeStain', 'scopeVignette', 'scopeSpeck', 'scopeIsolation', 'scopeDensity'];
 
 const ALPHA_BLEND = {
     color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },

@@ -9,7 +9,7 @@ import { SCOPE_BG, MAX_STAIN_TYPES } from '../../stainColor.js';
 export const ORGANIC_FIELDS = [
     'weightNorm', 'splatRadius', 'fieldGain', 'style', 'shape', 'threshold', 'nucleusThreshold', 'speciesTint',
     'dpr', 'rimStrength', 'coreThreshold', 'scopeStain', 'scopeVignette', 'scopeSpeck',
-    'fieldW', 'fieldH', 'margin', 'numTypes', 'scopeIsolation', 'sigmaSmall',
+    'fieldW', 'fieldH', 'margin', 'numTypes', 'scopeIsolation', 'sigmaSmall', 'scopeDensity',
 ];
 export const ORGANIC_UNIFORM_FLOATS = ORGANIC_FIELDS.length;
 
@@ -44,6 +44,7 @@ struct OrganicParams {
   numTypes: f32,          // パレットの種類数 (1..16)。scope の種類の角度
   scopeIsolation: f32,    // scope: 純粋な細胞の周りの異種を large から除く割合 (0 = フェーズ 2 と同じ)
   sigmaSmall: f32,        // small ぼかしの σ (field の px)。scope の混合域の両側を探す距離
+  scopeDensity: f32,      // scope: 密度 ρ による染色の深さ・核の帯の強さ (0 = 使わない。フェーズ 1 の見た目)
 };
 
 ${STYLE_CONSTS}
@@ -211,7 +212,8 @@ const OCC_SHARP = 2.0;
 const NUCLEUS_S = 3.5;
 const NUCLEUS_P = 1.8;
 
-// scope の small 用 b = 1 - exp(-(v / S)^P) (P = 1)。殻 v 2〜5 -> 0.15〜0.34、大細胞 v 10 -> 0.56、300 粒以上の塊 v 30 -> 0.92
+// scope の small 用 b = 1 - exp(-v_coh / S)。v_coh = |f.rg| x fieldGain (種類の角度のベクトルの和の長さ = 同じ種類がそろった密度。
+// 1 種類だけの所では生の密度 v と同じ、種類が混ざる所では小さくなる)。殻 v 2〜5 -> 0.15〜0.34、大細胞 v 10 -> 0.56、300 粒以上の塊 v 30 -> 0.92
 const SCOPE_DENS_S = 12.0;
 
 fn compress(v: f32, s: f32, p: f32) -> f32 {
@@ -232,7 +234,7 @@ fn shapeField(f: vec4f) -> vec4f {
     case SHAPE_OCCUPANCY, default: { c = 1.0 - exp(-OCC_SHARP * max(v - O.threshold, 0.0)); }
   }
   var out = shaped(f, c);
-  if (O.style == STYLE_SCOPE) { out.b = 1.0 - exp(-max(v, 0.0) / SCOPE_DENS_S); }    // 圧縮した生密度 (c を掛けない。composite の ρ)
+  if (O.style == STYLE_SCOPE) { out.b = 1.0 - exp(-length(f.rg) * O.fieldGain / SCOPE_DENS_S); }    // 圧縮した同種の密度 (c を掛けない。composite の ρ)
   return out;
 }
 
@@ -737,9 +739,10 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
   let thick = mix(0.7, 1.0, smoothstep(0.15, 0.85, nb));      // 大きな塊ほど厚い
   // 密度 ρ: 薄い所は淡く (色ごとの指数を下げる)。指数が 1 を超えると色相が動く (橙が赤へ) ので、
   // 濃い所の上乗せと核の帯は透過率の輝度の累乗 (スカラー) で暗くする
-  let dens = SCOPE_DENS_BASE + SCOPE_DENS_GAIN * rho;
+  // scopeDensity = 0 で dens = 1、deep = core = 0 (密度を使わない)
+  let dens = mix(1.0, SCOPE_DENS_BASE + SCOPE_DENS_GAIN * rho, O.scopeDensity);
   let big = smoothstep(SCOPE_CORE_N.x, SCOPE_CORE_N.y, nb);     // 大きな細胞だけ (小さな密な塊は暗くしない)
-  let core = smoothstep(SCOPE_CORE_RHO.x, SCOPE_CORE_RHO.y, rho) * big;
+  let core = O.scopeDensity * smoothstep(SCOPE_CORE_RHO.x, SCOPE_CORE_RHO.y, rho) * big;
   let deep = SCOPE_DEEP * max(dens - 1.0, 0.0) * big;
   let lt = luma(T);
   var body = col * pow(T, vec3f(k * m * thick * (1.0 + 1.2 * (noise.r - 0.5) + 1.0 * (noise.b - 0.5)) * min(dens, 1.0)));
