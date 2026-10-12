@@ -748,7 +748,6 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
     let T1 = stains.transmit[sp.i1].rgb;
     let Town = mix(T0, T1, saturate(dsw + 0.5));
     let sepOwn = select(0.0, 1.0, sp.i0 != sp.i1) * saturate(SCOPE_SEP_W * w + 0.5 - abs(dsw));
-    let sepColOwn = 0.5 * (pow(T0, vec3f(k * 2.2)) + pow(T1, vec3f(k * 2.2)));
     // 混合域: 両側の純粋な小器官 A / B の種類の切り替え
     let iA = sides.iA;
     let iB = sides.iB;
@@ -760,7 +759,6 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
     let TB = stains.transmit[iB].rgb;
     let Tpair = mix(TA, TB, saturate(dAB + 0.5) * useB);
     let sepPair = useB * saturate(SCOPE_SEP_W * w + 0.5 - abs(dAB));
-    let sepColPair = 0.5 * (pow(TA, vec3f(k * 2.2)) + pow(TB, vec3f(k * 2.2)));
     let T = mix(Tpair, Town, ownW);
 
     let e = 1.0 / vec2f(textureDimensions(smallBlur));
@@ -786,13 +784,16 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
     body *= 1.0 + SCOPE_RELIEF * clamp(tilt, -1.0, 1.0);
     body += SCOPE_SPEC * spec;
     let ring = cover * (1.0 - saturate(d - 1.3 * w + 0.5));
-    let outline = col * pow(T, vec3f(k * 2.2)) * 0.6 * pow(lt, k * deep);
-    // 種類の区切り線: 接する別種の小器官を別の物に見せる (色 = 両側の輪郭の色の平均を暗く)
-    let sepCol = col * mix(sepColPair, sepColOwn, ownW) * 0.5;
     let sep = SCOPE_SEP_ALPHA * cover * mix(sepPair, sepOwn, ownW);
+    let under = col;
     col = mix(col, body, cover);
-    col = mix(col, sepCol, sep);
-    col = mix(col, outline, ring);
+    // 種類の区切り線: 接する別種の小器官を別の物に見せる (色 = 両側の輪郭の色の平均を暗く)。線と輪郭の色 (pow) は線の上だけ
+    if (sep > 0.0) {
+      let sepColPair = 0.5 * (pow(TA, vec3f(k * 2.2)) + pow(TB, vec3f(k * 2.2)));
+      let sepColOwn = 0.5 * (pow(T0, vec3f(k * 2.2)) + pow(T1, vec3f(k * 2.2)));
+      col = mix(col, under * mix(sepColPair, sepColOwn, ownW) * 0.5, sep);
+    }
+    if (ring > 0.0) { col = mix(col, under * pow(T, vec3f(k * 2.2)) * 0.6 * pow(lt, k * deep), ring); }
   }
 
   col *= 1.0 + 0.16 * (noise.r - 0.5);
