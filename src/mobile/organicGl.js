@@ -78,7 +78,8 @@ void main() {
 `;
 
 // occupancy 整形 (scope の small): 1 - exp(-2 max(v - threshold, 0))。threshold は thresholdScale 倍済み。
-// 出力 = (e x c, rho, c)、e = f.rg / f.a (種類の角度の平均ベクトル)、rho = 1 - exp(-max(v, 0) / 12) (圧縮した生密度。c を掛けない。composite の密度で染色の濃さを変える)
+// 出力 = (e x c, rho, c)、e = f.rg / f.a (種類の角度の平均ベクトル)、rho = 1 - exp(-|f.rg| x gain / 12) (圧縮した同種の密度。
+// 種類の角度のベクトルの和の長さなので種類が混ざる所では小さい。c を掛けない。composite の密度で染色の濃さを変える)
 const SHAPE_OCC_FS = `#version 300 es
 precision highp float;
 uniform sampler2D uSrc;
@@ -89,7 +90,7 @@ void main() {
   vec4 f = texelFetch(uSrc, ivec2(gl_FragCoord.xy), 0);
   float v = max(f.a * uGain, 0.0);
   float c = 1.0 - exp(-2.0 * max(v - uThreshold, 0.0));
-  float rho = 1.0 - exp(-max(v, 0.0) / 12.0);
+  float rho = 1.0 - exp(-length(f.rg) * uGain / 12.0);
   outColor = vec4(f.rg / max(f.a, 1e-4) * c, rho, c);
 }
 `;
@@ -252,6 +253,7 @@ uniform float uReliefScale;           // 斜光の勾配の倍率 (rMax の smal
 uniform float uStain;
 uniform float uVignette;
 uniform float uSpeck;
+uniform float uDensity;              // 密度 rho による染色の深さ・核の帯の強さ (0 = 使わない)
 uniform float uNumTypes;              // パレットの種類数 (1..16)
 uniform vec4 uTransmit[${MAX_STAIN_TYPES}];            // 種類ごとの染色の透過率 (stainColor.js の buildStainTables)
 out vec4 outColor;
@@ -372,9 +374,10 @@ void main() {
     float thick = mix(0.7, 1.0, smoothstep(0.15, 0.85, l.a));
     // 密度 rho: 薄い所は淡く (指数 x min(dens, 1))。濃くする分と核の帯は luma(T) のスカラー累乗 (色相を保つ)
     float rho = s.b;
-    float dens = SCOPE_DENS_BASE + SCOPE_DENS_GAIN * rho;
+    // uDensity = 0 で dens = 1、deep = core = 0 (密度を使わない)
+    float dens = mix(1.0, SCOPE_DENS_BASE + SCOPE_DENS_GAIN * rho, uDensity);
     float big = smoothstep(SCOPE_CORE_N.x, SCOPE_CORE_N.y, l.a);
-    float core = smoothstep(SCOPE_CORE_RHO.x, SCOPE_CORE_RHO.y, rho) * big;
+    float core = uDensity * smoothstep(SCOPE_CORE_RHO.x, SCOPE_CORE_RHO.y, rho) * big;
     float deep = SCOPE_DEEP * max(dens - 1.0, 0.0) * big;
     float lt = luma(T);
     vec3 body = col * pow(T, vec3(k * m * thick * (1.0 + 1.2 * (noise.r - 0.5) + (noise.b - 0.5)) * min(dens, 1.0)));
@@ -818,6 +821,7 @@ export class OrganicGl {
             gl.uniform1f(cp.u.uStain, org.scopeStain);
             gl.uniform1f(cp.u.uVignette, org.scopeVignette);
             gl.uniform1f(cp.u.uSpeck, org.scopeSpeck);
+            gl.uniform1f(cp.u.uDensity, org.scopeDensity);
             gl.uniform1f(cp.u.uNumTypes, numTypes);
             gl.uniform4fv(cp.u.uTransmit, this.transmit);
             gl.activeTexture(gl.TEXTURE2);
