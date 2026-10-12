@@ -58,7 +58,7 @@ scope のときだけ、field / shaped / small / large のチャンネルの意�
 - 安全弁の範囲は R の固定値 (0.35, 0.75) ではなく N で正規化した値 (上限付き。`organic-rendering-spec.md` の scope の節)。固定値だと N = 2 / 3 の正しい境界が弁にかかり、N = 10 / 16 では偽の種類を消せない。
 - 小器官の安全弁は彩度を落とす (灰色へ寄せる) のではなく、不透明度 `cover` を `keep` 倍にする (隙間をぼかしが埋めた所を隙間として見せる)。灰色の版は光沢のある白い楔に見えた。細胞質だけは明るい灰色へ寄せる。 **(後で変更: 下の「混合域の両側」。cover は周りが純粋な小器官で占められていれば落とさない)**
 - 細胞質の補間の幅は `saturate(side / sin(π/N) + 0.5)` (|e| = 1 で u の幅 0.5 にほぼ等しい)。
-- `stain[]` は uniform に入れているが composite は `transmit[]` だけ読む。
+- composite の uniform (`StainTables`) は `transmit[]` だけ (256 B)。`stain[]` は読まれないので渡さない (最適化パスで削除)。
 - mobile (`organicGl.js`) も同じ式・定数で移植済み (`uTransmit[16]` + `uNumTypes`。`stain[]` は渡さない)。field が負値を持つが RGBA16F・線形補間・3 次 B スプライン (重みが非負) で問題なし。
 
 受け入れ (フェーズ 1):

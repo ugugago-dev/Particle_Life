@@ -341,13 +341,13 @@ void main() {
   vec2 es = s.rg / max(s.a, 1e-4);
   float gradE = length(dFdx(es)) + length(dFdy(es));         // 1 px あたりの e の変化
   Species sp = decodeSpecies(es);
-  Species spl = decodeSpecies(l.rg / max(l.a, 1e-4));
 
   vec3 col = SCOPE_BG * (1.0 + 0.05 * (noise.g - 0.5));
   float dist = (n - SCOPE_EDGE) / max(fwN, 1e-4);
   float inside = clamp(dist + 0.5, 0.0, 1.0);
   if (inside > 0.0) {
     // 細胞質: 隣の種類との線形補間 (u の幅 0.5 の柔らかい切り替え)
+    Species spl = decodeSpecies(l.rg / max(l.a, 1e-4));
     float hl = sin(min(PI / max(uNumTypes, 1.0), 0.5 * PI));
     vec3 Tl = desaturate(mix(uTransmit[spl.i0].rgb, uTransmit[spl.i1].rgb, clamp(spl.side / max(hl, 0.1) + 0.5, 0.0, 1.0)), spl.keep);
     col *= mix(vec3(1.0), pow(Tl, vec3(SCOPE_CYTO * uStain)), inside);
@@ -373,26 +373,41 @@ void main() {
     float spec = pow(clamp(dot(nrm, normalize(vec3(SCOPE_LIGHT * 0.5, 1.0))), 0.0, 1.0), 48.0);
     float thick = mix(0.7, 1.0, smoothstep(0.15, 0.85, l.a));
     // 密度 rho: 薄い所は淡く (指数 x min(dens, 1))。濃くする分と核の帯は luma(T) のスカラー累乗 (色相を保つ)
-    float rho = s.b;
-    // uDensity = 0 で dens = 1、deep = core = 0 (密度を使わない)
-    float dens = mix(1.0, SCOPE_DENS_BASE + SCOPE_DENS_GAIN * rho, uDensity);
-    float big = smoothstep(SCOPE_CORE_N.x, SCOPE_CORE_N.y, l.a);
-    float core = uDensity * smoothstep(SCOPE_CORE_RHO.x, SCOPE_CORE_RHO.y, rho) * big;
-    float deep = SCOPE_DEEP * max(dens - 1.0, 0.0) * big;
-    float lt = luma(T);
+    // uDensity = 0 で dens = 1、deep = core = 0 (密度を使わない。その分の計算も省く)
+    float dens = 1.0;
+    float deep = 0.0;
+    float core = 0.0;
+    float lt = 1.0;
+    if (uDensity > 0.0) {
+      float rho = s.b;
+      dens = mix(1.0, SCOPE_DENS_BASE + SCOPE_DENS_GAIN * rho, uDensity);
+      float big = smoothstep(SCOPE_CORE_N.x, SCOPE_CORE_N.y, l.a);
+      core = uDensity * smoothstep(SCOPE_CORE_RHO.x, SCOPE_CORE_RHO.y, rho) * big;
+      deep = SCOPE_DEEP * max(dens - 1.0, 0.0) * big;
+      lt = luma(T);
+    }
     vec3 body = col * pow(T, vec3(k * m * thick * (1.0 + 1.2 * (noise.r - 0.5) + (noise.b - 0.5)) * min(dens, 1.0)));
-    body *= pow(lt, k * (deep + SCOPE_CORE * core));
-    body = max(mix(vec3(luma(body)), body, 1.0 + SCOPE_CORE_SAT * core), vec3(0.0));
+    if (uDensity > 0.0) {
+      body *= pow(lt, k * (deep + SCOPE_CORE * core));
+      body = max(mix(vec3(luma(body)), body, 1.0 + SCOPE_CORE_SAT * core), vec3(0.0));
+    }
     body *= 1.0 + SCOPE_RELIEF * clamp(tilt, -1.0, 1.0);
     body += SCOPE_SPEC * spec;
     float ring = cover * (1.0 - clamp(d - 1.3 * w + 0.5, 0.0, 1.0)) * edgeFade;
-    vec3 outline = col * pow(T, vec3(k * 2.2)) * 0.6 * pow(lt, k * deep);
-    // 種類の区切り線: 接する別種の小器官を別の物に見せる (色 = 両側の輪郭の色の平均を暗く)
-    vec3 sepCol = col * 0.5 * (pow(T0, vec3(k * 2.2)) + pow(T1, vec3(k * 2.2))) * 0.5;
     float sep = SCOPE_SEP_ALPHA * cover * sp.keep * (sp.i0 != sp.i1 ? 1.0 : 0.0) * clamp(SCOPE_SEP_W * w + 0.5 - abs(dsw), 0.0, 1.0);
+    // 区切り線 (sep) と輪郭 (ring) は縁の近くだけ非 0。0 の所は mix(col, x, 0) = col なので色の計算ごと省く
+    vec3 col0 = col;
     col = mix(col, body, cover);
-    col = mix(col, sepCol, sep);
-    col = mix(col, outline, ring);
+    if (sep > 0.0) {
+      // 種類の区切り線: 接する別種の小器官を別の物に見せる (色 = 両側の輪郭の色の平均を暗く)
+      vec3 sepCol = col0 * 0.5 * (pow(T0, vec3(k * 2.2)) + pow(T1, vec3(k * 2.2))) * 0.5;
+      col = mix(col, sepCol, sep);
+    }
+    if (ring > 0.0) {
+      vec3 outline = col0 * pow(T, vec3(k * 2.2)) * 0.6;
+      if (uDensity > 0.0) outline *= pow(lt, k * deep);
+      col = mix(col, outline, ring);
+    }
   }
 
   col *= 1.0 + 0.16 * (noise.r - 0.5);
@@ -556,9 +571,12 @@ export class OrganicGl {
         this.copyVbo = gl.createBuffer();
         this.copyCapacity = 0;
         this.copies = new Float32Array(0);
+        this.copyKey = { version: NaN, count: -1, r: 0, W: 0, H: 0 };    // VBO に入っている周期コピーの条件 { version, count, r, W, H } と個数 (SimClient の version が同じ間は詰め直さない)
+        this.copyN = 0;
         this.palette = new Float32Array(MAX_PALETTE * 4);
         this.transmit = new Float32Array(MAX_STAIN_TYPES * 4);    // scope の染色の透過率 (パレットが変わったときだけ作り直す)
-        this.transmitKey = '';
+        this.transmitKey = new Float32Array(1 + 3 * MAX_PALETTE);    // [numTypes, palette rgb...] (比べるだけ。毎フレーム文字列を作らない)
+        this.transmitValid = false;
         this.plan = null;
         this.tapCache = new Map();
     }
@@ -628,6 +646,8 @@ export class OrganicGl {
         const { width: W, height: H } = sim.world;
         const { x, y, type } = sim;
         const n = sim.count;
+        const ck = this.copyKey;
+        if (ck.version === sim.version && ck.count === n && ck.r === r && ck.W === W && ck.H === H) return this.copyN;    // VBO は前回のまま
         let c = this.copies;
         let k = 0;
         const push = (px, py, t) => {
@@ -650,6 +670,13 @@ export class OrganicGl {
             if (dx !== 0 && dy !== 0) push(px + dx, py + dy, t);
         }
         const count = k / 3;
+        // version が NaN (CpuSimulation / fallback) なら次回も一致しないので毎回詰め直す
+        ck.version = sim.version ?? NaN;
+        ck.count = n;
+        ck.r = r;
+        ck.W = W;
+        ck.H = H;
+        this.copyN = count;
         if (count === 0) return 0;
         gl.bindVertexArray(this.copyVao);
         gl.bindBuffer(gl.ARRAY_BUFFER, this.copyVbo);
@@ -742,10 +769,14 @@ export class OrganicGl {
         }
         const numTypes = Math.min(Math.max(view.palette.numTypes, 1), MAX_PALETTE);
         if (scope) {
-            const key = `${numTypes}:${Array.from(pal.subarray(0, 3 * numTypes)).join(',')}`;
-            if (key !== this.transmitKey) {
+            const key = this.transmitKey;
+            let same = this.transmitValid && key[0] === numTypes;
+            for (let i = 0; same && i < 3 * numTypes; i++) same = key[1 + i] === pal[i];
+            if (!same) {
                 this.transmit = buildStainTables(pal, numTypes).transmit;
-                this.transmitKey = key;
+                key[0] = numTypes;
+                for (let i = 0; i < 3 * numTypes; i++) key[1 + i] = pal[i];
+                this.transmitValid = true;
             }
         }
         const copies = this.uploadCopies(sim, radius);

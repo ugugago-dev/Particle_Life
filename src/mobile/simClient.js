@@ -38,6 +38,7 @@ export class SimClient {
         this.stepMs = 0;          // Worker の 1 ステップの時間 (直近)
         this.droppedSteps = 0;    // 依頼が詰まって捨てた step 数
         this.snapshots = 0;       // 受け取った snapshot 数
+        this.version = 0;         // x / y / type の中身が変わるたびに増やす (描画側が同じ中身の再アップロードを省く。fallback 中は NaN = 常に変わる扱い)
 
         this.worker = worker;
         this.ready = false;
@@ -83,6 +84,7 @@ export class SimClient {
         }
         if (this.rulesCopy) fb.setRules(this.rulesCopy);
         this.fallback = fb;
+        this.version = NaN;       // 以後は main スレッドで毎ステップ書き換わる
         this.isWorker = false;
         this.inFlight = 0;
         this.pool.length = 0;
@@ -117,6 +119,7 @@ export class SimClient {
             this.numTypes = m.numTypes;
             this.grid = m.grid;
             this.snapshots++;
+            this.version++;
         } else {
             this.recycle(m.x, m.y, m.typeBuf);
         }
@@ -132,6 +135,7 @@ export class SimClient {
         this.y = y;
         this.type = type;
         this.epoch++;
+        this.version++;
         this.pool.length = 0;
     }
 
@@ -152,6 +156,7 @@ export class SimClient {
             y[i] = wrap(y[i], h);
         }
         this.epoch++;
+        this.version++;
         this.post({ type: 'world', epoch: this.epoch, width, height });
     }
 

@@ -1,5 +1,5 @@
 // Particle Life の GPU 版。A = 現在の状態 (描画も読む)、B = scatter でセル順に並べ替えた近傍ループ用のコピー (force は B -> A)
-// 物理は legacy/js-cpu の simulation.js と同じ (f32 なので下位桁だけ違う)
+// 物理は src/mobile/cpuSimulation.js (CPU 版) と同じ (f32 なので下位桁だけ違う)
 
 import { createShaderModule, withErrorScope } from './device.js';
 import { PARAMS_FLOATS, PARAMS_STRUCT_FIELDS, assertParamsLayout } from './shaders/common.wgsl.js';
@@ -89,11 +89,11 @@ export class GpuSimulation {
         if (this.buffers) for (const b of Object.values(this.buffers)) b.destroy();
         this.count = n;
         const m = Math.max(n, 1);
-        const mk = (label, bytes) => device.createBuffer({ label, size: bytes, usage: STORAGE | COPY_SRC | COPY_DST });
+        // A は loadState の書き込みとテスト用ハーネス (label で拾う) の読み戻しに COPY_*。残りは GPU 内だけで使う
+        const mk = (label, bytes, usage = STORAGE) => device.createBuffer({ label, size: bytes, usage });
         this.buffers = {
-            posVelA: mk('posVel A', m * 16),   // vec4f (x, y, vx, vy)
-            metaA: mk('meta A', m * 8),        // vec2<u32> (type, id)
-            densityA: mk('density A', m * 4),  // f32 (デバッグの読み戻し用)
+            posVelA: mk('posVel A', m * 16, STORAGE | COPY_SRC | COPY_DST),   // vec4f (x, y, vx, vy)
+            metaA: mk('meta A', m * 8, STORAGE | COPY_SRC | COPY_DST),        // vec2<u32> (type, id)
             posTypeB: mk('posType B (cell-sorted)', m * 16),  // vec4f (x, y, type, 0)
             velIdB: mk('velId B (cell-sorted)', m * 16),      // vec4f (vx, vy, id, 0)
             posTypeP: mk('posType + pressure (cell-sorted)', m * 16),  // vec4f (x, y, type, pressure)。圧力ありの force が読む
@@ -108,7 +108,8 @@ export class GpuSimulation {
         // リサイズ中に毎フレーム作り直さないよう余裕を持たせる
         const capacity = Math.max(16, Math.ceil(nCells * 1.25));
         this.grid.capacity = capacity;
-        const mk = (label, bytes) => device.createBuffer({ label, size: bytes, usage: STORAGE | COPY_SRC | COPY_DST });
+        // numCellParticles は作成時の 0 と scan のリセットに頼るのでクリア (COPY_DST) は要らない
+        const mk = (label, bytes) => device.createBuffer({ label, size: bytes, usage: STORAGE });
         this.cellBuffers = {
             numCellParticles: mk('numCellParticles', capacity * 4),
             firstCellParticle: mk('firstCellParticle', (capacity + 1) * 4),
@@ -138,14 +139,14 @@ export class GpuSimulation {
             layout: pipelines[name].getBindGroupLayout(0),
             entries: [U, ...entries.map((buffer, i) => ({ binding: i + 1, resource: { buffer } }))],
         });
-        const { posVelA, metaA, densityA, posTypeB, velIdB, posTypeP, slot } = buffers;
+        const { posVelA, metaA, posTypeB, velIdB, posTypeP, slot } = buffers;
         this.bindGroups.wrap = bg('wrap', [posVelA]);
         if (!cellBuffers) return;
         const { numCellParticles, firstCellParticle } = cellBuffers;
         this.bindGroups.count = bg('count', [posVelA, numCellParticles, slot]);
         this.bindGroups.scan = bg('scan', [numCellParticles, firstCellParticle]);
         this.bindGroups.scatter = bg('scatter', [posVelA, metaA, slot, firstCellParticle, posTypeB, velIdB]);
-        this.bindGroups.density = bg('density', [posTypeB, firstCellParticle, densityA, posTypeP]);
+        this.bindGroups.density = bg('density', [posTypeB, firstCellParticle, posTypeP]);
         if (rulesBuffer) {
             this.bindGroups.force = bg('force', [posTypeB, velIdB, firstCellParticle, rulesBuffer, posVelA, metaA]);
             const pressureBuffers = [posTypeP, velIdB, firstCellParticle, rulesBuffer, posVelA, metaA];
@@ -172,7 +173,6 @@ export class GpuSimulation {
         if (n > 0) {
             queue.writeBuffer(this.buffers.posVelA, 0, pv);
             queue.writeBuffer(this.buffers.metaA, 0, meta);
-            queue.writeBuffer(this.buffers.densityA, 0, new Float32Array(n));
         }
     }
 
@@ -392,68 +392,5 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         pass.setPipeline(pipelines[force]);
         pass.setBindGroup(0, bindGroups[force]);
         pass.dispatchWorkgroups(ceilDiv(count, FORCE_WORKGROUP));
-    }
-
-    /**
-     * デバッグ用。density は圧縮の制限が有効なときだけ更新される。
-     * @returns {Promise<{count:number, x:Float32Array, y:Float32Array, vx:Float32Array, vy:Float32Array,
-     *                    type:Uint32Array, id:Uint32Array, density:Float32Array}>}
-     */
-    async readState() {
-        const { device, count } = this;
-        const n = count;
-        const pvBytes = n * 16;
-        const metaBytes = n * 8;
-        const densBytes = n * 4;
-        const staging = device.createBuffer({
-            size: Math.max(16, pvBytes + metaBytes + densBytes),
-            usage: GPUBufferUsage.MAP_READ | COPY_DST,
-        });
-        const enc = device.createCommandEncoder();
-        if (n > 0) {
-            enc.copyBufferToBuffer(this.buffers.posVelA, 0, staging, 0, pvBytes);
-            enc.copyBufferToBuffer(this.buffers.metaA, 0, staging, pvBytes, metaBytes);
-            enc.copyBufferToBuffer(this.buffers.densityA, 0, staging, pvBytes + metaBytes, densBytes);
-        }
-        device.queue.submit([enc.finish()]);
-        await staging.mapAsync(GPUMapMode.READ);
-        const raw = staging.getMappedRange().slice(0);
-        staging.unmap();
-        staging.destroy();
-
-        const pv = new Float32Array(raw, 0, n * 4);
-        const meta = new Uint32Array(raw, pvBytes, n * 2);
-        const density = new Float32Array(raw, pvBytes + metaBytes, n);
-        const out = {
-            count: n,
-            x: new Float32Array(n), y: new Float32Array(n),
-            vx: new Float32Array(n), vy: new Float32Array(n),
-            type: new Uint32Array(n), id: new Uint32Array(n),
-            density: density.slice(),
-        };
-        for (let i = 0; i < n; i++) {
-            out.x[i] = pv[4 * i];
-            out.y[i] = pv[4 * i + 1];
-            out.vx[i] = pv[4 * i + 2];
-            out.vy[i] = pv[4 * i + 3];
-            out.type[i] = meta[2 * i];
-            out.id[i] = meta[2 * i + 1];
-        }
-        return out;
-    }
-
-    /** デバッグ用: 直近の step の firstCellParticle (nCells + 1 個)。 */
-    async readFirstCellParticle() {
-        const { device } = this;
-        const bytes = (this.grid.nCells + 1) * 4;
-        const staging = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | COPY_DST });
-        const enc = device.createCommandEncoder();
-        enc.copyBufferToBuffer(this.cellBuffers.firstCellParticle, 0, staging, 0, bytes);
-        device.queue.submit([enc.finish()]);
-        await staging.mapAsync(GPUMapMode.READ);
-        const out = new Uint32Array(staging.getMappedRange().slice(0));
-        staging.unmap();
-        staging.destroy();
-        return out;
     }
 }

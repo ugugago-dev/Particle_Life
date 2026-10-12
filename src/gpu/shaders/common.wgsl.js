@@ -46,7 +46,7 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> P: Params;
 
-// x-major (CPU 版 grid.build と同じ)。min は丸めで x == worldW になったときの保険
+// x-major (CPU 版 cpuSimulation.js と同じ)。min は丸めで x == worldW になったときの保険
 fn cellIndex(x: f32, y: f32) -> u32 {
   let cx = min(P.nx - 1u, u32(x * P.invCellW));
   let cy = min(P.ny - 1u, u32(y * P.invCellH));

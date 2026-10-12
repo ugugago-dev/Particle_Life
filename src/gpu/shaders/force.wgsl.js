@@ -141,8 +141,7 @@ ${neighbourLoop('accumulate', 'vec2f(0.0)')}
 export const densityWGSL = COMMON_WGSL + /* wgsl */`
 @group(0) @binding(1) var<storage, read> posType: array<vec4f>;
 @group(0) @binding(2) var<storage, read> firstCellParticle: array<u32>;
-@group(0) @binding(3) var<storage, read_write> dstDensity: array<f32>;      // デバッグの読み戻し用
-@group(0) @binding(4) var<storage, read_write> posTypeP: array<vec4f>;
+@group(0) @binding(3) var<storage, read_write> posTypeP: array<vec4f>;
 
 fn accumulate(start: u32, end: u32, xi: f32, yi: f32, row: u32, myP: f32, myV: vec2f, shift: vec2f) -> f32 {
   var sum = 0.0;
@@ -181,6 +180,5 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 ${neighbourLoop('accumulate', '0.0')}
 
   posTypeP[i] = vec4f(meFull.xyz, max(0.0, acc - P.restDensity));
-  dstDensity[i] = acc;
 }
 `;

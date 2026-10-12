@@ -36,8 +36,6 @@ async function main() {
         console.error(e);
         return showUnsupported(String(e.message ?? e), 'error');
     }
-    const timer = new GpuTimer(device);
-
     const query = new URLSearchParams(location.search);
     const advanced = query.has('advanced'); // public page: basic controls only
     const initialPreset = PRESETS[Number(query.get('preset')) - 1]; // 1-based, undefined if absent / out of range
@@ -49,7 +47,9 @@ async function main() {
         params.numTypes = rules.numTypes;
     }
     const { pointer } = createInput(canvas);
-    const stats = advanced ? new StatsOverlay(timer.enabled) : null;
+    // timestamp queries only feed the stats overlay: the public page writes none
+    const timer = advanced ? new GpuTimer(device) : null;
+    const stats = timer ? new StatsOverlay(timer.enabled) : null;
     let palette = createPalette(params.numTypes);
     let rulesDirty = true;
     let ui = null; // set once lil-gui has loaded
@@ -164,10 +164,10 @@ async function main() {
             params,
             pointer,
             steps: params.running ? params.substeps : 0,
-            timestampWrites: timer.simWrites(),
+            timestampWrites: timer?.simWrites(),
         });
-        renderer.draw(encoder, sim, view, timer);
-        const slot = stats ? timer.resolve(encoder) : null;
+        renderer.draw(encoder, sim, view, timer ?? undefined);
+        const slot = timer ? timer.resolve(encoder) : null;
         device.queue.submit([encoder.finish()]);
         if (slot) timer.collect(slot).then(() => stats.recordGpu(timer.simMs, timer.drawMs));
 

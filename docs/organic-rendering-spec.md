@@ -143,7 +143,7 @@ scope のスプラットは 0.2 (= 0.4 x 0.5)。粒 (ごみ) 対策のために�
   - 不透明度: `cover` に `mix(SCOPE_MIX_COVER = 0, 1, keepEff)` を掛ける (染色・レリーフ・スペキュラ・輪郭・外側の明るい線・区切り線すべて)。`keepEff = max(keep, smoothstep(0.15, 0.35, cov) * smoothstep(0.6, 0.95, share))`、`cov` = タップの得点の平均 (周りが純粋な小器官で占められている割合)、`share` = 得点の合計のうち上位 3 種類の割合 (3 つの小器官が接する所も含める。多種類が入り組んだガスの塊では低い)。接触帯は不透明に塗られ、純粋な側の無い多種類の混ざりだけが従来どおり透ける。粒子の無い隙間は `m` の輪郭 (`cover = saturate(d + 0.5)`) が残す (同じ種類の隙間と同じ扱い。ぼかしより狭い隙間は埋まる)。
   - 旧版 (フェーズ 1〜3) は混合域全体の不透明度を `keep` で落としていたので、離れた種類が接する所 (6 種類の紫 (0) と黄 (4) など) に白い隙間が開き、ぼかしと同じ幅のフェードで細い小器官 (輪) が切れて見えた。
 - 細胞質の色: `el` から同様に復元し、隣の種類と線形補間 (`saturate(side / sin(π/N) + 0.5)`、u の幅 0.5 の柔らかい切り替え)。こちらの安全弁は不透明度ではなく、透過率を淡い灰色 (`mix(luma(T), 1, 0.5)`) へ `1 - keep` だけ寄せる (ごく薄い色なので目立たない)。
-- 種類ごとの染色 `stain[16]` / 透過率 `transmit[16]` (`min(stain / 背景, 1)`) は `src/stainColor.js` の `buildStainTables` でパレットが変わったときだけ計算し、composite の binding 7 (uniform `StainTables`) へ書く。背景色 `SCOPE_BG` も stainColor.js の値を WGSL へ埋め込む。
+- 種類ごとの染色 `stain[16]` / 透過率 `transmit[16]` (`min(stain / 背景, 1)`) は `src/stainColor.js` の `buildStainTables` でパレットが変わったときだけ計算し、composite が読む `transmit` だけを binding 7 (uniform `StainTables`、256 バイト) へ書く。背景色 `SCOPE_BG` も stainColor.js の値を WGSL へ埋め込む。
 
 - 背景: 淡い暖色の透過光 `(.93,.94,.88)`。paper の `g` で ±2.5% の照明むら、`r` の粒状ノイズ (全体に ±8%)。接眼レンズのビネット = 中心からの距離を対角線の半分で割った `r` (角で 1、アスペクトを保った円) で `1 - 0.55 * scopeVignette * smoothstep(0.4, 1, r)` を全体に掛ける (0.6 で角は 0.67 倍。最大でも 0.45 倍で、真っ黒にはならない)。
 - 体 (細胞質): `n` (soft 整形の large ぼかしの体の場 `l.b`。+ 低周波ノイズ ±0.04) の等高線 `n = 0.2` の内側に、`el` から復元した種類の染色の透過率を `0.1 * scopeStain` 乗した、ごく薄い色を掛ける。壁 = 輪郭に沿った暗い灰色の線 (半幅 `0.7 dpr`、不透明度 0.65) と、その外側 `1.6 dpr` の明るい線 (屈折のハロー、不透明度 0.7)。どちらも `fwidth` の px 距離で AA し、勾配が弱い所 (`fwidth(n)` が 0.002〜0.005 未満) では出さない (glass の膜と同じ)。
@@ -235,6 +235,10 @@ scope のスプラットは 0.2 (= 0.4 x 0.5)。粒 (ごみ) 対策のために�
   - splat の周期境界を「粒子 x 4 instance」から「余白付き field + shape での折り返し」に: 頂点シェーダの実行が 1 粒子 24 回 -> 4 回 (strip 込み)。splat の時間 1/3。
   - cell の画面固定ノイズを焼く: composite の画素ごとのハッシュ計算 (最大 32 回) が textureLoad 1 回に。
   - 四角形 (dots / splat / ポインタ円) を triangle-list の 6 頂点から triangle-strip の 4 頂点に。
+  - (画素単位で同じ画のまま仕事を減らしたもの。swiftshader では壁時計でもパスごとのタイムスタンプでも差が雑音に埋もれて測れなかった (scope の composite の中央値 253 -> 254 ms、同じ回の変えていない glass の composite が 211 -> 235 ms と揺れる) ので、減らした仕事の量だけ記す。実 GPU では未計測)
+    - RenderParams も OrganicParams と同じく前回とビットで比べて変わったときだけ送る。organic の中間パスの `beginRenderPass` の記述は plan を作るときに作って使い回す (毎フレームの割り当てなし)。
+    - scope の composite: 小器官の染色・レリーフ (small の 4 回のサンプル)・輪郭・区切り線は `cover > 0` の画素 (既定のシーンで画面の約 11%) だけ計算する (どれも `cover` 倍で混ぜるので外の画素では値が変わらない。微分は分岐の前で取る)。区切り線・輪郭の色 (pow) はさらにその線の上 (`sep > 0` / `ring > 0`) だけ、核・濃染の暗くする処理は `scopeDensity > 0` のときだけ。異種の塊のゲートは `scopeIsolation > 0` のときだけ、その atan2 は `decodeSpecies` のものを使う。`decodeSpecies` / `speciesSplit` の numTypes だけで決まる値 (cos 2 回・sin 1 回) は画素ごとに 1 回 (`SK`)。
+    - `StainTables` は composite が読む `transmit` だけ (256 バイト)。
 - 周期境界: splat の余白の折り返しとブラーの repeat サンプラで、画面の端でも輪郭が途切れない。縮小 (downsample) だけは端をクランプする (奇数サイズのときの最後の 1 テクセルだけ影響)。
   余白は field の大きさで頭打ち (スプラット半径が field より大きい極端な設定では 1 回分しか折り返さない。以前の 4 コピー方式と同じ)。
 
