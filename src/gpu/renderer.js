@@ -14,6 +14,7 @@ import { ORGANIC_STYLES, SHAPE_INDEX } from '../organicStyles.js';
 import { buildStainTables, MAX_STAIN_TYPES } from '../stainColor.js';
 
 const BG = { r: 1 / 255, g: 14 / 255, b: 29 / 255, a: 1 };   // style.css の --bg
+const CLEAR = { r: 0, g: 0, b: 0, a: 0 };
 const TRAIL_FORMAT = 'rgba16float';  // 8bit だとフェードの丸めで残像が消えきらない
 const FIELD_FORMAT = 'rgba16float';  // 加算しても 1 で飽和しない
 const GRANULE_FORMAT = 'r16float';
@@ -37,10 +38,27 @@ const ADDITIVE_BLEND = {
     alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
 };
 
+/** organic の中間パスの beginRenderPass の記述 (plan を作るときに 1 度だけ作り、毎フレーム使い回す)。 */
+function passDesc(label, view, extraView, clearValue = CLEAR) {
+    const attach = (v) => ({ view: v, clearValue, loadOp: 'clear', storeOp: 'store' });
+    return { label, colorAttachments: extraView ? [attach(view), attach(extraView)] : [attach(view)], timestampWrites: undefined };
+}
+
 /** σ (px) を SIGMA_MAX_TEXELS 以下に収める縮小の段数。 */
 function blurLevel(sigmaPx) {
     const k = Math.ceil(Math.log2(Math.max(sigmaPx, 1e-3) / SIGMA_MAX_TEXELS));
     return Math.min(MAX_BLUR_LEVEL, Math.max(0, k));
+}
+
+/** bits が前回送った sent と違えば sent を更新して true。 */
+function bitsChanged(bits, sent) {
+    for (let i = 0; i < bits.length; i++) {
+        if (bits[i] !== sent[i]) {
+            sent.set(bits);
+            return true;
+        }
+    }
+    return false;
 }
 
 const TAP_WEIGHTS = new Float64Array(2 * BLUR_MAX_PAIRS + 1);
@@ -89,7 +107,10 @@ export class GpuRenderer {
         this.canvas = canvas;
         this.dpr = 1;
 
+        // 前回送った値とビットで比べて、変わったときだけ送る (organic params と同じ)
         this.uniformData = new Float32Array(RENDER_UNIFORM_FLOATS);
+        this.uniformU32 = new Uint32Array(this.uniformData.buffer);
+        this.uniformSent = new Uint32Array(RENDER_UNIFORM_FLOATS);
         this.uniformBuffer = device.createBuffer({
             label: 'render params',
             size: RENDER_UNIFORM_FLOATS * 4,
@@ -321,19 +342,16 @@ export class GpuRenderer {
 
         const shapePipeline = granules ? pipelines.shapeGranule : softLarge ? pipelines.shapeSoft : pipelines.shape;
         const shapePass = {
-            label: 'organic shape',
+            desc: passDesc('organic shape', levels[0].view, granule?.view ?? (softLarge ? levelsL[0].view : undefined)),
             pipeline: shapePipeline,
-            target: levels[0].view,
-            extraTarget: granule?.view ?? (softLarge ? levelsL[0].view : undefined),
             group: null,    // softLarge は large ぼかしの出力 (前フレームの値) も読むので、それを作ったあとで
         };
         const passes = [shapePass];    // 実行順の全画面パス
         for (const chain of softLarge ? [levels, levelsL] : [levels]) {
             for (let k = 1; k < chain.length; k++) {
                 passes.push({
-                    label: `organic downsample ${k}`,
+                    desc: passDesc(`organic downsample ${k}`, chain[k].view),
                     pipeline: pipelines.downsample,
-                    target: chain[k].view,
                     group: device.createBindGroup({
                         layout: pipelines.downsample.getBindGroupLayout(0),
                         entries: [{ binding: 0, resource: chain[k - 1].view }],
@@ -347,9 +365,8 @@ export class GpuRenderer {
             const out = make(`${branch} blur`, lv.w, lv.h);
             const add = (name, axis, src, dst) => {
                 const pass = {
-                    label: `organic blur ${name}`,
+                    desc: passDesc(`organic blur ${name}`, dst.view),
                     pipeline: pipelines.blur,
-                    target: dst.view,
                     group: device.createBindGroup({
                         layout: pipelines.blur.getBindGroupLayout(0),
                         entries: [
@@ -397,9 +414,11 @@ export class GpuRenderer {
 
         return {
             fw, fh, margin, ks, kl, granules, softLarge: !!softLarge, textures, passes, blurs, compositeGroup,
-            fieldView: field.view, granuleView: granuleRaw?.view ?? null,
+            splatDesc: passDesc('organic splat', field.view, granuleRaw?.view),
+            // canvas の view (と timestampWrites) は毎フレーム差し替える
+            compositeDesc: passDesc('organic composite', null, undefined, { r: 0, g: 0, b: 0, a: 1 }),
             paper, paperW: canvas.width, paperH: canvas.height, paperDpr: this.dpr,
-            paperView: paperTex?.view ?? null, paperGroup, paperDirty: paper,
+            paperDesc: paperTex ? passDesc('organic paper', paperTex.view) : null, paperGroup, paperDirty: paper,
         };
     }
 
@@ -509,13 +528,12 @@ export class GpuRenderer {
             u[4] *= 0.5;
             u[11] = 0.3;
         }
-        device.queue.writeBuffer(this.uniformBuffer, 0, u);
+        if (bitsChanged(this.uniformU32, this.uniformSent)) device.queue.writeBuffer(this.uniformBuffer, 0, u);
 
         this.updatePalette(view.palette);
         this.updateParticleGroup(sim);
 
         const canvasView = this.context.getCurrentTexture().createView();
-        const bgClear = { r: BG.r, g: BG.g, b: BG.b, a: 1 };
 
         if (organic) {
             this.drawOrganic(encoder, sim, view, canvasView, { dots: !!org.showParticles, pointerOn, timer });
@@ -526,7 +544,7 @@ export class GpuRenderer {
         if (!view.trails) {
             const pass = encoder.beginRenderPass({
                 label: 'draw',
-                colorAttachments: [{ view: canvasView, clearValue: bgClear, loadOp: 'clear', storeOp: 'store' }],
+                colorAttachments: [{ view: canvasView, clearValue: BG, loadOp: 'clear', storeOp: 'store' }],
                 timestampWrites: timer?.drawWrites(),
             });
             this.drawParticles(pass, pipelines.particleToCanvas, this.particleGroup.canvas, count);
@@ -544,7 +562,7 @@ export class GpuRenderer {
             label: 'trail',
             colorAttachments: [{
                 view: this.trailView,
-                clearValue: bgClear,
+                clearValue: BG,
                 loadOp: clear ? 'clear' : 'load',
                 storeOp: 'store',
             }],
@@ -560,7 +578,7 @@ export class GpuRenderer {
 
         const finalPass = encoder.beginRenderPass({
             label: 'present',
-            colorAttachments: [{ view: canvasView, loadOp: 'clear', clearValue: bgClear, storeOp: 'store' }],
+            colorAttachments: [{ view: canvasView, loadOp: 'clear', clearValue: BG, storeOp: 'store' }],
             timestampWrites: timer?.drawEndWrites(),
         });
         finalPass.setPipeline(pipelines.blit);
@@ -582,10 +600,7 @@ export class GpuRenderer {
         this.updateSplatGroup(sim);
 
         if (plan.paperDirty) {    // 紙のノイズは plan を作り直した直後だけ焼く
-            const pass = encoder.beginRenderPass({
-                label: 'organic paper',
-                colorAttachments: [{ view: plan.paperView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' }],
-            });
+            const pass = encoder.beginRenderPass(plan.paperDesc);
             pass.setPipeline(pipelines.paper);
             pass.setBindGroup(0, plan.paperGroup);
             pass.draw(3);
@@ -593,34 +608,25 @@ export class GpuRenderer {
             plan.paperDirty = false;
         }
 
-        const clear = { r: 0, g: 0, b: 0, a: 0 };
-        const colorAttachments = [{ view: plan.fieldView, clearValue: clear, loadOp: 'clear', storeOp: 'store' }];
-        if (plan.granuleView) colorAttachments.push({ view: plan.granuleView, clearValue: clear, loadOp: 'clear', storeOp: 'store' });
-        const splatPass = encoder.beginRenderPass({
-            label: 'organic splat',
-            colorAttachments,
-            timestampWrites: timer?.drawBeginWrites(),
-        });
-        splatPass.setPipeline(plan.granuleView ? pipelines.splatGranule : pipelines.splat);
-        splatPass.setBindGroup(0, plan.granuleView ? this.splatGroups.granule : this.splatGroups.plain);
+        plan.splatDesc.timestampWrites = timer?.drawBeginWrites();
+        const splatPass = encoder.beginRenderPass(plan.splatDesc);
+        splatPass.setPipeline(plan.granules ? pipelines.splatGranule : pipelines.splat);
+        splatPass.setBindGroup(0, plan.granules ? this.splatGroups.granule : this.splatGroups.plain);
         splatPass.draw(4, count);
         splatPass.end();
 
         for (const p of plan.passes) {
-            const colorAttachments = [{ view: p.target, clearValue: clear, loadOp: 'clear', storeOp: 'store' }];
-            if (p.extraTarget) colorAttachments.push({ view: p.extraTarget, clearValue: clear, loadOp: 'clear', storeOp: 'store' });
-            const pass = encoder.beginRenderPass({ label: p.label, colorAttachments });
+            const pass = encoder.beginRenderPass(p.desc);
             pass.setPipeline(p.pipeline);
             pass.setBindGroup(0, p.group);
             pass.draw(3);
             pass.end();
         }
 
-        const pass = encoder.beginRenderPass({
-            label: 'organic composite',
-            colorAttachments: [{ view: canvasView, clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
-            timestampWrites: timer?.drawEndWrites(),
-        });
+        const desc = plan.compositeDesc;
+        desc.colorAttachments[0].view = canvasView;
+        desc.timestampWrites = timer?.drawEndWrites();
+        const pass = encoder.beginRenderPass(desc);
         pass.setPipeline(pipelines.composite);
         pass.setBindGroup(0, plan.compositeGroup);
         pass.draw(3);
@@ -649,14 +655,7 @@ export class GpuRenderer {
         for (const name of COPIED_PARAMS) f[OF[name]] = org[name];
         f[OF.threshold] *= style.thresholdScale ?? 1;
 
-        const sent = this.organicSent;
-        for (let i = 0; i < u.length; i++) {
-            if (u[i] !== sent[i]) {
-                sent.set(u);
-                this.device.queue.writeBuffer(this.organicBuffer, 0, f);
-                return;
-            }
-        }
+        if (bitsChanged(u, this.organicSent)) this.device.queue.writeBuffer(this.organicBuffer, 0, f);
     }
 
     /** σ が変わったブラーのパスだけタップ表を書き直す。 */
