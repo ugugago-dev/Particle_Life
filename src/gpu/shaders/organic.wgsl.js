@@ -779,8 +779,10 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
     let deep = SCOPE_DEEP * max(dens - 1.0, 0.0) * big;
     let lt = luma(T);
     var body = col * pow(T, vec3f(k * m * thick * (1.0 + 1.2 * (noise.r - 0.5) + 1.0 * (noise.b - 0.5)) * min(dens, 1.0)));
-    body *= pow(lt, k * (deep + SCOPE_CORE * core));
-    body = max(mix(vec3f(luma(body)), body, 1.0 + SCOPE_CORE_SAT * core), vec3f(0.0));
+    if (O.scopeDensity > 0.0) {    // 0 では deep = core = 0 で、次の 2 行は body を変えない
+      body *= pow(lt, k * (deep + SCOPE_CORE * core));
+      body = max(mix(vec3f(luma(body)), body, 1.0 + SCOPE_CORE_SAT * core), vec3f(0.0));
+    }
     body *= 1.0 + SCOPE_RELIEF * clamp(tilt, -1.0, 1.0);
     body += SCOPE_SPEC * spec;
     let ring = cover * (1.0 - saturate(d - 1.3 * w + 0.5));
