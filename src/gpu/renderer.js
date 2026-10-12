@@ -644,6 +644,7 @@ export class GpuRenderer {
         f[OF.fieldW] = layout.fw;
         f[OF.fieldH] = layout.fh;
         f[OF.margin] = layout.margin;
+        f[OF.sigmaSmall] = layout.sigmaSmall;
         f[OF.numTypes] = Math.min(Math.max(palette.numTypes, 1), MAX_STAIN_TYPES);
         for (const name of COPIED_PARAMS) f[OF[name]] = org[name];
         f[OF.threshold] *= style.thresholdScale ?? 1;

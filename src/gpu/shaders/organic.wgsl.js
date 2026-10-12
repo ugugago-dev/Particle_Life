@@ -9,7 +9,7 @@ import { SCOPE_BG, MAX_STAIN_TYPES } from '../../stainColor.js';
 export const ORGANIC_FIELDS = [
     'weightNorm', 'splatRadius', 'fieldGain', 'style', 'shape', 'threshold', 'nucleusThreshold', 'speciesTint',
     'dpr', 'rimStrength', 'coreThreshold', 'scopeStain', 'scopeVignette', 'scopeSpeck',
-    'fieldW', 'fieldH', 'margin', 'numTypes', 'scopeIsolation',
+    'fieldW', 'fieldH', 'margin', 'numTypes', 'scopeIsolation', 'sigmaSmall',
 ];
 export const ORGANIC_UNIFORM_FLOATS = ORGANIC_FIELDS.length;
 
@@ -43,6 +43,7 @@ struct OrganicParams {
   margin: f32,            // field の余白 (px)
   numTypes: f32,          // パレットの種類数 (1..16)。scope の種類の角度
   scopeIsolation: f32,    // scope: 純粋な細胞の周りの異種を large から除く割合 (0 = フェーズ 2 と同じ)
+  sigmaSmall: f32,        // small ぼかしの σ (field の px)。scope の混合域の両側を探す距離
 };
 
 ${STYLE_CONSTS}
@@ -510,6 +511,18 @@ const SCOPE_PURITY_CAP_LO = 0.55;         // 種類が多いとき (隣同士の
 const SCOPE_PURITY_CAP_HI = 0.75;
 const SCOPE_MIX_LIGHT = 0.5;               // 細胞質: 混合域の灰色を明るくする割合 (0 = 同じ輝度)
 const SCOPE_MIX_COVER = 0.0;               // 小器官: 純度が低い所 (keep = 0) の不透明度 (隙間をぼかしが埋めた所を隙間に見せる)
+// 混合域の両側: 純度の低い画素 (keep < 1) は周りの small ぼかしを 8 方向 x 2 距離 (混合の幅 x SCOPE_SIDE_DIST) 見て、
+// 純粋な小器官の種類から塗る (混合した値そのものは復元しない: 離れた種類の間に偽の中間の種類が出ない)。周りが純粋な小器官で
+// 占められている (接触帯) なら不透明にする。多種類が入り組んだ所 (ガスの塊) は従来どおり薄く、隙間は m の cover が残す
+const SCOPE_SIDE_DIRS = 8;
+const SCOPE_SIDE_STEPS = 2;
+const SCOPE_SIDE_DIST = 1.0;               // タップの間隔 / 混合の幅
+const SCOPE_SIDE_SPLAT = 0.3;              // スプラットの核 (1 - d^2)^3 の σ / 半径 (混合の幅 = sqrt((0.3 r_splat)^2 + σ_small^2))
+const SCOPE_SIDE_M = vec2f(0.2, 0.35);     // 側の候補に要る占有度 (m。小器官の輪郭 SCOPE_BODY で 1)
+const SCOPE_SIDE_PENALTY = 1.0;            // 純粋でない候補の不利 (aff から引く量 x (1 - best))
+const SCOPE_SIDE_OWN = vec2f(0.75, 1.0);   // 自分の復元に戻す keep
+const SCOPE_SIDE_SHARE = vec2f(0.6, 0.95);  // タップの得点のうち上位 3 種類の割合
+const SCOPE_SIDE_COV = vec2f(0.15, 0.35);    // 純粋な小器官に当たったタップの割合 (得点の平均) -> 混合域を不透明に
 const SCOPE_SEP_W = 0.4;                   // 種類の区切り線の半幅 (dpr px)
 const SCOPE_SEP_ALPHA = 0.5;
 // 密度 (ρ = small の b)。色ごとの染色の指数 x min(BASE + GAIN ρ, 1)、1 を超えた分 x DEEP と核の帯 x CORE は luma(T) の累乗で暗くする
@@ -558,6 +571,87 @@ fn decodeSpecies(e: vec2f) -> Species {
   return sp;
 }
 
+// 純度の低い画素 (混合域) の両側の純粋な小器官。周りのタップごとに得点 (純度 keep x 占有度) と最寄りの種類を求め、
+// 種類ごとの最高点 best[] と合計 sum[] を取る (自分も純度 keep の分だけ候補)。e がどの候補の向きに寄っているか
+// (aff = dot(e, 種類の向き) - SCOPE_SIDE_PENALTY (1 - best)) の上位 2 つを A / B とする。cov = タップの得点の平均
+// (周りが純粋な小器官で占められている割合)。タップの得点は隣り合う 2 種類に連続に分けるので、どれもタップの値について連続
+struct Sides {
+  iA: i32,
+  iB: i32,
+  affA: f32,
+  affB: f32,
+  cov: f32,
+  share: f32,     // タップの得点のうち上位 3 種類の割合 (多種類が入り組んだ所で低い)
+};
+
+// decodeSpecies の side から i1 の割合 (種類の中心で 0 / 1、境界で 0.5。細胞質の補間と同じ幅)
+fn speciesSplit(side: f32) -> f32 {
+  return saturate(side / max(sin(min(PI / max(O.numTypes, 1.0), 0.5 * PI)), 0.1) + 0.5);
+}
+
+fn pureSides(uv: vec2f, e: vec2f, sp: Species) -> Sides {
+  var best: array<f32, ${MAX_STAIN_TYPES}>;
+  var sum: array<f32, ${MAX_STAIN_TYPES}>;
+  for (var i = 0; i < ${MAX_STAIN_TYPES}; i++) { best[i] = 0.0; sum[i] = 0.0; }
+  let w0 = speciesSplit(sp.side);
+  best[sp.i0] = sp.keep * (1.0 - w0);
+  best[sp.i1] = max(best[sp.i1], sp.keep * w0);
+  var cov = 0.0;
+  let mixPx = sqrt(pow(SCOPE_SIDE_SPLAT * O.splatRadius * O.fieldH, 2.0) + O.sigmaSmall * O.sigmaSmall);
+  let toUv = mixPx / vec2f(O.fieldW, O.fieldH);
+  for (var k = 0; k < SCOPE_SIDE_DIRS; k++) {
+    let t = TAU * (f32(k) + 0.5) / f32(SCOPE_SIDE_DIRS);
+    let dir = vec2f(cos(t), sin(t)) * toUv;
+    for (var j = 1; j <= SCOPE_SIDE_STEPS; j++) {
+      let sk = textureSampleLevel(smallBlur, samp, uv + dir * (SCOPE_SIDE_DIST * f32(j)), 0.0);
+      let dk = decodeSpecies(sk.rg / max(sk.a, EPS));
+      let score = dk.keep * smoothstep(SCOPE_SIDE_M.x, SCOPE_SIDE_M.y, sk.a);
+      let w1 = speciesSplit(dk.side);     // 2 つの種類に連続に分ける (最寄りの種類だけにすると境界のタップで跳ぶ)
+      cov += score;
+      best[dk.i0] = max(best[dk.i0], score * (1.0 - w1));
+      best[dk.i1] = max(best[dk.i1], score * w1);
+      sum[dk.i0] += score * (1.0 - w1);
+      sum[dk.i1] += score * w1;
+    }
+  }
+  var r: Sides;
+  r.iA = select(sp.i0, sp.i1, sp.side > 0.0);
+  r.iB = r.iA;
+  r.affA = -1e3;
+  r.affB = -1e3;
+  r.cov = cov / f32(SCOPE_SIDE_DIRS * SCOPE_SIDE_STEPS);
+  for (var i = 0; i < i32(O.numTypes); i++) {
+    if (best[i] <= 0.0) { continue; }
+    let aff = dot(e, speciesDir(i)) - SCOPE_SIDE_PENALTY * (1.0 - best[i]);
+    if (aff > r.affA) {
+      r.iB = r.iA;
+      r.affB = r.affA;
+      r.iA = i;
+      r.affA = aff;
+    } else if (aff > r.affB) {
+      r.iB = i;
+      r.affB = aff;
+    }
+  }
+  // share: 得点の合計の上位 3 種類の割合 (3 つの小器官が接する所も含める)。順位の入れ替わりでは跳ばない (同点では同じ値)
+  var s1 = 0.0;
+  var s2 = 0.0;
+  var s3 = 0.0;
+  for (var i = 0; i < i32(O.numTypes); i++) {
+    let v = sum[i];
+    s3 = max(s3, min(v, s2));
+    s2 = max(s2, min(v, s1));
+    s1 = max(s1, v);
+  }
+  r.share = (s1 + s2 + s3) / max(cov, 1e-4);
+  return r;
+}
+
+fn speciesDir(i: i32) -> vec2f {
+  let a = TAU * (f32(i) + 0.5) / max(O.numTypes, 1.0);
+  return vec2f(cos(a), sin(a));
+}
+
 // 灰色へ (1 - keep) だけ寄せる (透過率なので明るくする = 淡い染色)
 fn desaturate(c: vec3f, keep: f32) -> vec3f {
   return mix(vec3f(mix(luma(c), 1.0, SCOPE_MIX_LIGHT)), c, keep);
@@ -592,7 +686,31 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
   let dsw = sp.side / max(gradE, 1e-5);                        // 切り替えからの px (i1 側が正)
   let T0 = stains.transmit[sp.i0].rgb;
   let T1 = stains.transmit[sp.i1].rgb;
-  let T = mix(T0, T1, saturate(dsw + 0.5));
+  let Town = mix(T0, T1, saturate(dsw + 0.5));
+  let sepOwn = select(0.0, 1.0, sp.i0 != sp.i1) * saturate(SCOPE_SEP_W * w + 0.5 - abs(dsw));
+  let sepColOwn = 0.5 * (pow(T0, vec3f(k * 2.2)) + pow(T1, vec3f(k * 2.2)));
+  // 混合域 (keep < 1): 両側の純粋な小器官 A / B の種類で塗る。切り替えは e 空間で A と B の垂直二等分線 (原点を通る) までの
+  // 符号付き距離 (隣の種類なら上の side と同じ)。純粋な画素 (keep = 1) は従来どおり (タップも読まない)
+  let t0 = select(sp.i0, sp.i1, sp.side > 0.0);
+  var sides = Sides(t0, t0, 0.0, -1e3, 0.0, 0.0);
+  if (sp.keep < 1.0 && m > SCOPE_SIDE_M.x) { sides = pureSides(uv, es, sp); }   // 微分は使わない (分岐は一様でない)
+  let iA = sides.iA;
+  let iB = sides.iB;
+  let ab = speciesDir(iB) - speciesDir(iA);
+  let useB = select(0.0, 1.0, iA != iB && sides.affB > -1e2);
+  // A と B の切り替えからの px (B 側が正)。罰則が無ければ e 空間で A と B の垂直二等分線 (原点を通る) までの距離 (隣の種類なら上の side と同じ)
+  let dAB = (sides.affB - sides.affA) / max(length(ab), 1e-3) / max(gradE, 1e-5);
+  let TA = stains.transmit[iA].rgb;
+  let TB = stains.transmit[iB].rgb;
+  let Tpair = mix(TA, TB, saturate(dAB + 0.5) * useB);
+  let sepPair = useB * saturate(SCOPE_SEP_W * w + 0.5 - abs(dAB));
+  let sepColPair = 0.5 * (pow(TA, vec3f(k * 2.2)) + pow(TB, vec3f(k * 2.2)));
+  // 自分の復元へ戻すのは keep が 1 に近い所だけ (keep の途中では自分の復元が隣の偽の種類と区切り線を出す)
+  let ownW = smoothstep(SCOPE_SIDE_OWN.x, SCOPE_SIDE_OWN.y, sp.keep);
+  let T = mix(Tpair, Town, ownW);
+  // 周りが純粋な小器官で占められていれば混合域も不透明 (接触帯)。多種類の混ざり (ガスの塊) は従来どおり薄く。隙間は m の cover が残す
+  let contact = smoothstep(SCOPE_SIDE_COV.x, SCOPE_SIDE_COV.y, sides.cov) * smoothstep(SCOPE_SIDE_SHARE.x, SCOPE_SIDE_SHARE.y, sides.share);
+  let keepEff = max(sp.keep, contact);
   let d = (m - SCOPE_BODY) / max(fwidth(m), 1e-4);             // 小器官の輪郭からの px
   let rho = s.b;
   // 体の外の小さな塊は描かない。ただし純粋な細胞の近くの異種の塊 (壁が押し出されないので n が低い) は、密度があれば
@@ -604,7 +722,7 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
   let near = smoothstep(SCOPE_FOREIGN_NEAR.x, SCOPE_FOREIGN_NEAR.y, nb);    // 遠い裾の中の塊は対象外 (何も無い所の塊と同じ扱い)
   let foreignS = select(0.0, dom.y * near * saturate(circDist(speciesCoord(es), dom.x)), O.scopeIsolation > 0.0);
   let gate = max(nGate, foreignS * rhoGate);
-  let pure = gate * mix(SCOPE_MIX_COVER, 1.0, sp.keep);         // 混合域 (離れた種類の隙間をぼかしが埋めた所) は薄く: 下の細胞質・背景が見える
+  let pure = gate * mix(SCOPE_MIX_COVER, 1.0, keepEff);        // 純粋な側の無い混合域 (多種類の混ざり) だけ薄く: 下の細胞質・背景が見える
   let cover = saturate(d + 0.5) * pure;
   col = mix(col, line, 0.4 * saturate(0.5 * w + 0.5 - abs(d + 1.5 * w)) * pure);
 
@@ -632,8 +750,8 @@ fn scopeStyle(s: vec4f, l: vec4f, uv: vec2f, noise: vec3f) -> vec3f {
   let ring = cover * (1.0 - saturate(d - 1.3 * w + 0.5));
   let outline = col * pow(T, vec3f(k * 2.2)) * 0.6 * pow(lt, k * deep);
   // 種類の区切り線: 接する別種の小器官を別の物に見せる (色 = 両側の輪郭の色の平均を暗く)
-  let sepCol = col * 0.5 * (pow(T0, vec3f(k * 2.2)) + pow(T1, vec3f(k * 2.2))) * 0.5;
-  let sep = SCOPE_SEP_ALPHA * cover * sp.keep * select(0.0, 1.0, sp.i0 != sp.i1) * saturate(SCOPE_SEP_W * w + 0.5 - abs(dsw));
+  let sepCol = col * mix(sepColPair, sepColOwn, ownW) * 0.5;
+  let sep = SCOPE_SEP_ALPHA * cover * mix(sepPair, sepOwn, ownW);
   col = mix(col, body, cover);
   col = mix(col, sepCol, sep);
   col = mix(col, outline, ring);
