@@ -10,6 +10,7 @@ const MAX_PAIRS = 6;                      // 中心 + 6 ペア = 最大 13 フ�
 const DEFAULT_FIELD_SCALE = 0.25;
 const PC_RMAX_PX = 0.03 * 1080;           // PC 版の既定 (rMax 0.03、1080 px) での rMax の px。膜の勾配しきい値はこれで調整されている
 const PC_RMAX_SMALL_TEXELS = 0.03 * 540;  // PC 版の既定 (fieldScale 0.5、ks 0) での rMax の small テクセル数。scope の斜光はこれで調整されている
+const SCOPE_SIDE_SPLAT = 0.3;              // スプラットの核 (1 - d^2)^3 の σ / 半径 (organic.wgsl.js と同じ。混合域の両側を探す距離)
 const MAX_SOFT_LEVEL = 2;                 // soft 整形はこの段まで field から直接縮小して書く (最大 4x4 フェッチ)
 
 const QUAD = `vec2 quadCorner() { return vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)) * 2.0 - 1.0; }`;
@@ -256,6 +257,7 @@ uniform float uSpeck;
 uniform float uDensity;              // 密度 rho による染色の深さ・核の帯の強さ (0 = 使わない)
 uniform float uNumTypes;              // パレットの種類数 (1..16)
 uniform vec4 uTransmit[${MAX_STAIN_TYPES}];            // 種類ごとの染色の透過率 (stainColor.js の buildStainTables)
+uniform vec2 uSideUv;                 // 混合域の両側を探すタップの間隔 (uv。PC の pureSides の mixPx / field の大きさ)
 out vec4 outColor;
 const vec3 SCOPE_BG = vec3(${SCOPE_BG.join(', ')});    // stainColor.js と共有
 const float SCOPE_EDGE = 0.2;
@@ -277,6 +279,15 @@ const float SCOPE_MIX_LIGHT = 0.5;
 const float SCOPE_MIX_COVER = 0.0;
 const float SCOPE_SEP_W = 0.4;
 const float SCOPE_SEP_ALPHA = 0.5;
+// 混合域の両側の純粋な小器官 (PC の SCOPE_SIDE_* と同じ値)
+const int SCOPE_SIDE_DIRS = 8;
+const int SCOPE_SIDE_STEPS = 2;
+const float SCOPE_SIDE_DIST = 1.0;
+const vec2 SCOPE_SIDE_M = vec2(0.2, 0.35);
+const float SCOPE_SIDE_PENALTY = 1.0;
+const vec2 SCOPE_SIDE_OWN = vec2(0.75, 1.0);
+const vec2 SCOPE_SIDE_SHARE = vec2(0.6, 0.95);
+const vec2 SCOPE_SIDE_COV = vec2(0.15, 0.35);
 // 密度 (rho = small の b。PC の SCOPE_DENS_* / SCOPE_DEEP / SCOPE_CORE* と同じ値)
 const float SCOPE_DENS_BASE = 0.6;
 const float SCOPE_DENS_GAIN = 1.4;
@@ -315,6 +326,77 @@ Species decodeSpecies(vec2 e) {
 }
 // 灰色へ (1 - keep) だけ寄せる (透過率なので明るくする = 淡い染色)
 vec3 desaturate(vec3 c, float keep) { return mix(vec3(mix(luma(c), 1.0, SCOPE_MIX_LIGHT)), c, keep); }
+// decodeSpecies の side から i1 の割合 (種類の中心で 0 / 1、境界で 0.5)
+float speciesSplit(float side) { return clamp(side / max(sin(min(PI / max(uNumTypes, 1.0), 0.5 * PI)), 0.1) + 0.5, 0.0, 1.0); }
+vec2 speciesDir(int i) {
+  float a = TAU * (float(i) + 0.5) / max(uNumTypes, 1.0);
+  return vec2(cos(a), sin(a));
+}
+// 混合域 (純度の低い画素) の両側の純粋な小器官 A / B (organic.wgsl.js の pureSides をそのまま移植)。
+// 周りのタップの得点 (純度 keep x 占有度) から種類ごとの最高点 best[] と合計 sum[] を取り、e が寄っている上位 2 つを A / B にする。
+// cov = 周りが純粋な小器官で占められている割合、share = 得点のうち上位 3 種類の割合。これが無いと異種の小器官の接触帯が隙間 (白) になる
+struct Sides {
+  int iA;
+  int iB;
+  float affA;
+  float affB;
+  float cov;
+  float share;
+};
+Sides pureSides(vec2 uv, vec2 e, Species sp) {
+  float best[${MAX_STAIN_TYPES}];
+  float sum[${MAX_STAIN_TYPES}];
+  for (int i = 0; i < ${MAX_STAIN_TYPES}; i++) { best[i] = 0.0; sum[i] = 0.0; }
+  float w0 = speciesSplit(sp.side);
+  best[sp.i0] = sp.keep * (1.0 - w0);
+  best[sp.i1] = max(best[sp.i1], sp.keep * w0);
+  float cov = 0.0;
+  for (int k = 0; k < SCOPE_SIDE_DIRS; k++) {
+    float t = TAU * (float(k) + 0.5) / float(SCOPE_SIDE_DIRS);
+    vec2 dir = vec2(cos(t), sin(t)) * uSideUv;
+    for (int j = 1; j <= SCOPE_SIDE_STEPS; j++) {
+      vec4 sk = textureLod(uSmall, uv + dir * (SCOPE_SIDE_DIST * float(j)), 0.0);
+      Species dk = decodeSpecies(sk.rg / max(sk.a, 1e-4));
+      float score = dk.keep * smoothstep(SCOPE_SIDE_M.x, SCOPE_SIDE_M.y, sk.a);
+      float w1 = speciesSplit(dk.side);    // 2 つの種類に連続に分ける (最寄りの種類だけにすると境界のタップで跳ぶ)
+      cov += score;
+      best[dk.i0] = max(best[dk.i0], score * (1.0 - w1));
+      best[dk.i1] = max(best[dk.i1], score * w1);
+      sum[dk.i0] += score * (1.0 - w1);
+      sum[dk.i1] += score * w1;
+    }
+  }
+  Sides r;
+  r.iA = sp.side > 0.0 ? sp.i1 : sp.i0;
+  r.iB = r.iA;
+  r.affA = -1e3;
+  r.affB = -1e3;
+  r.cov = cov / float(SCOPE_SIDE_DIRS * SCOPE_SIDE_STEPS);
+  int nt = int(uNumTypes);
+  float s1 = 0.0;
+  float s2 = 0.0;
+  float s3 = 0.0;
+  for (int i = 0; i < ${MAX_STAIN_TYPES}; i++) {
+    if (i >= nt) break;
+    float v = sum[i];
+    s3 = max(s3, min(v, s2));
+    s2 = max(s2, min(v, s1));
+    s1 = max(s1, v);
+    if (best[i] <= 0.0) continue;
+    float aff = dot(e, speciesDir(i)) - SCOPE_SIDE_PENALTY * (1.0 - best[i]);
+    if (aff > r.affA) {
+      r.iB = r.iA;
+      r.affB = r.affA;
+      r.iA = i;
+      r.affA = aff;
+    } else if (aff > r.affB) {
+      r.iB = i;
+      r.affB = aff;
+    }
+  }
+  r.share = (s1 + s2 + s3) / max(cov, 1e-4);
+  return r;
+}
 void main() {
   vec2 uv = gl_FragCoord.xy / uCanvas;
   vec3 noise = texelFetch(uPaper, ivec2(gl_FragCoord.xy), 0).rgb;
@@ -359,14 +441,31 @@ void main() {
   float d = (m - SCOPE_BODY) / max(fwM, 1e-4);
   float gate = uSpeck <= 0.0 ? 1.0 : clamp((n - SCOPE_GATE * uSpeck) / max(fwN * 1.3, 1e-4) + 0.5, 0.0, 1.0);
   float dsw = sp.side / max(gradE, 1e-5);                    // 種類の切り替えからの px (i1 側が正)
-  float pure = gate * mix(SCOPE_MIX_COVER, 1.0, sp.keep);    // 混合域 (離れた種類の隙間をぼかしが埋めた所) は薄く: 下の細胞質・背景が見える
+  // 混合域 (keep < 1): 両側の純粋な小器官 A / B の種類で塗る。純粋な画素 (keep = 1) はタップを読まない
+  int t0 = sp.side > 0.0 ? sp.i1 : sp.i0;
+  Sides sides = Sides(t0, t0, 0.0, -1e3, 0.0, 0.0);
+  if (sp.keep < 1.0 && m > SCOPE_SIDE_M.x) sides = pureSides(uv, es, sp);
+  float ownW = smoothstep(SCOPE_SIDE_OWN.x, SCOPE_SIDE_OWN.y, sp.keep);    // 自分の復元へ戻すのは keep が 1 に近い所だけ
+  // 周りが純粋な小器官で占められていれば混合域も不透明 (接触帯)。多種類の混ざり (ガスの塊) は従来どおり薄く
+  float contact = smoothstep(SCOPE_SIDE_COV.x, SCOPE_SIDE_COV.y, sides.cov) * smoothstep(SCOPE_SIDE_SHARE.x, SCOPE_SIDE_SHARE.y, sides.share);
+  float pure = gate * mix(SCOPE_MIX_COVER, 1.0, max(sp.keep, contact));    // 純粋な側の無い混合域だけ薄く: 下の細胞質・背景が見える
   float cover = clamp(d + 0.5, 0.0, 1.0) * pure;
   float edgeFade = smoothstep(0.015 * uGradScale, 0.045 * uGradScale, fwM);    // 鞍点 (勾配 ~0) では輪郭線を出さない (スマホ版だけ)
   col = mix(col, line, 0.4 * clamp(0.5 * w + 0.5 - abs(d + 1.5 * w), 0.0, 1.0) * pure * edgeFade);
   if (cover > 0.0) {
     vec3 T0 = uTransmit[sp.i0].rgb;
     vec3 T1 = uTransmit[sp.i1].rgb;
-    vec3 T = mix(T0, T1, clamp(dsw + 0.5, 0.0, 1.0));
+    vec3 Town = mix(T0, T1, clamp(dsw + 0.5, 0.0, 1.0));
+    float sepOwn = (sp.i0 != sp.i1 ? 1.0 : 0.0) * clamp(SCOPE_SEP_W * w + 0.5 - abs(dsw), 0.0, 1.0);
+    // 混合域: 両側の純粋な小器官 A / B の種類の切り替え (B 側が正の px)
+    float useB = (sides.iA != sides.iB && sides.affB > -1e2) ? 1.0 : 0.0;
+    vec2 ab = speciesDir(sides.iB) - speciesDir(sides.iA);
+    float dAB = (sides.affB - sides.affA) / max(length(ab), 1e-3) / max(gradE, 1e-5);
+    vec3 TA = uTransmit[sides.iA].rgb;
+    vec3 TB = uTransmit[sides.iB].rgb;
+    vec3 Tpair = mix(TA, TB, clamp(dAB + 0.5, 0.0, 1.0) * useB);
+    float sepPair = useB * clamp(SCOPE_SEP_W * w + 0.5 - abs(dAB), 0.0, 1.0);
+    vec3 T = mix(Tpair, Town, ownW);
     vec2 g = gd * uReliefScale;
     float tilt = -dot(g, SCOPE_LIGHT) * SCOPE_SLOPE;
     vec3 nrm = normalize(vec3(-g * SCOPE_SLOPE, 1.0));
@@ -394,13 +493,15 @@ void main() {
     body *= 1.0 + SCOPE_RELIEF * clamp(tilt, -1.0, 1.0);
     body += SCOPE_SPEC * spec;
     float ring = cover * (1.0 - clamp(d - 1.3 * w + 0.5, 0.0, 1.0)) * edgeFade;
-    float sep = SCOPE_SEP_ALPHA * cover * sp.keep * (sp.i0 != sp.i1 ? 1.0 : 0.0) * clamp(SCOPE_SEP_W * w + 0.5 - abs(dsw), 0.0, 1.0);
+    float sep = SCOPE_SEP_ALPHA * cover * mix(sepPair, sepOwn, ownW);
     // 区切り線 (sep) と輪郭 (ring) は縁の近くだけ非 0。0 の所は mix(col, x, 0) = col なので色の計算ごと省く
     vec3 col0 = col;
     col = mix(col, body, cover);
     if (sep > 0.0) {
       // 種類の区切り線: 接する別種の小器官を別の物に見せる (色 = 両側の輪郭の色の平均を暗く)
-      vec3 sepCol = col0 * 0.5 * (pow(T0, vec3(k * 2.2)) + pow(T1, vec3(k * 2.2))) * 0.5;
+      vec3 sepColPair = 0.5 * (pow(TA, vec3(k * 2.2)) + pow(TB, vec3(k * 2.2)));
+      vec3 sepColOwn = 0.5 * (pow(T0, vec3(k * 2.2)) + pow(T1, vec3(k * 2.2)));
+      vec3 sepCol = col0 * mix(sepColPair, sepColOwn, ownW) * 0.5;
       col = mix(col, sepCol, sep);
     }
     if (ring > 0.0) {
@@ -855,6 +956,9 @@ export class OrganicGl {
             gl.uniform1f(cp.u.uDensity, org.scopeDensity);
             gl.uniform1f(cp.u.uNumTypes, numTypes);
             gl.uniform4fv(cp.u.uTransmit, this.transmit);
+            // PC の pureSides の mixPx (スプラットの核の σ と small ぼかしの σ を合わせた混合の幅、field の px) を uv に
+            const mixPx = Math.hypot(SCOPE_SIDE_SPLAT * radius * pxPerWorld, sigmaSmall);
+            gl.uniform2f(cp.u.uSideUv, mixPx / fw, mixPx / fh);
             gl.activeTexture(gl.TEXTURE2);
             gl.bindTexture(gl.TEXTURE_2D, plan.paper.tex);
         } else {
