@@ -225,6 +225,8 @@ PC 版の organic (`docs/organic-rendering-spec.md`) は WebGPU の MRT・rgba16
 
 スマホ版の organic は **scope** を既定にする (`config.js` の既定が scope。`?style=glass` か保存した設定で glass)。設定シートの `ガラス` か `?style=glass` で glass を描く (cell は描けないので scope にする)。scope の仕様は `docs/organic-rendering-spec.md` の「scope」節 (`softLarge`、`thresholdScale = 1.6`、`fine = {splat 0.4, small 0.4, large 1}`、`paper`、`scopeStain` / `scopeVignette` / `scopeSpeck`) と `src/gpu/shaders/organic.wgsl.js` の scope 部分。
 
+- 異種の小器官の接触帯 (ぼかしで純度が下がる所) は PC と同じ `pureSides` で両側の純粋な小器官を探し、不透明に塗って区切り線を引く (`SCOPE_SIDE_*` は PC と同じ値、タップの間隔は `uSideUv` = PC の mixPx / field の大きさ)。これが無いと接触帯が `SCOPE_MIX_COVER = 0` で透けて、小器官の間に白い隙間が出る。
+
 scope の種類の描き分け (`docs/scope-species-spec.md` フェーズ 1) は `organicGl.js` にも入れてある。field (rg = cosθ, sinθ の加算、b = 0) は rgba16f の負値を保つ (3 次 B スプラインの重みは非負なのでリンギングは出ない)。染色の透過率は `stainColor.js` の `buildStainTables` をパレットが変わったときだけ作り、`uTransmit[16]` と `uNumTypes` で composite へ渡す (GLSL の OKLab は削除)。式・定数は PC の `decodeSpecies` / `scopeStyle` と同じ。
 
 scope の密度による染色 (`docs/scope-species-spec.md` フェーズ 2 の実装メモ) も入れてある。`SHAPE_OCC_FS` が small の b に `1 - exp(-max(v, 0) / 12)` を書き (`SOFT_DOWN_FS` は 0 のまま)、composite は `rho = s.b` で染色の指数に `min(0.6 + 1.4 rho, 1)` を掛け、濃くする分と核の帯は `luma(T)` の累乗で暗くする (色相を保つ)。旧核小体は廃止。式・定数は PC と同じ。
