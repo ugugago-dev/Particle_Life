@@ -184,7 +184,7 @@ scope のスプラットは 0.2 (= 0.4 x 0.5)。粒 (ごみ) 対策のために�
 | パラメータ | 既定 | 範囲 (GUI) | 意味 |
 |---|---|---|---|
 | `renderMode` | `'organic'` | `dots` / `organic` | |
-| `organicStyle` | `'scope'` | `glass` / `cell` / `scope` | スタイル固有の項目 (`blurLarge` / `speciesTint` を含む) は、そのスタイルが読むときだけ GUI に出る。表にないスタイル名 (廃止した glow / bands / mono など) は glass として描く |
+| `organicStyle` | `'scope'` | `glass` / `cell` / `scope` | スタイル固有の項目 (`blurLarge` / `speciesTint` を含む) は、そのスタイルが読むときだけ GUI に出る。表にないスタイル名 (廃止した glow / bands / mono など) は既定の scope として描く |
 | `fieldScale` | 0.5 | 0.25 / 0.5 / 1 | field の解像度 (canvas に対する比)。重い場合は下げる |
 | `splatRadius` | 0.5 | 0.2〜1.5 | スプラット半径 (x rMax) |
 | `fieldGain` | 1 | 0.2〜4 | 正規化した場への倍率 (全スタイル) |

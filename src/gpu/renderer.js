@@ -11,6 +11,7 @@ import {
     splatWGSL, shapeWGSL, downsampleWGSL, blurWGSL, compositeWGSL, paperWGSL,
 } from './shaders/organic.wgsl.js';
 import { ORGANIC_STYLES, SHAPE_INDEX } from '../organicStyles.js';
+import { defaults } from '../config.js';
 import { buildStainTables, MAX_STAIN_TYPES } from '../stainColor.js';
 
 const BG = { r: 1 / 255, g: 14 / 255, b: 29 / 255, a: 1 };   // style.css の --bg
@@ -589,7 +590,7 @@ export class GpuRenderer {
     drawOrganic(encoder, sim, view, canvasView, { dots, pointerOn, timer }) {
         const { pipelines } = this;
         const org = view.organic;
-        const style = ORGANIC_STYLES[org.organicStyle] ?? ORGANIC_STYLES.glass;    // 廃止したスタイル名は glass
+        const style = ORGANIC_STYLES[org.organicStyle] ?? ORGANIC_STYLES[defaults.organicStyle];    // 廃止したスタイル名は既定 (scope)
         const count = sim.count;
         const layout = this.updateOrganicLayout(org, style, view.rMax, sim.world.height);
         const plan = this.ensureOrganicPlan(layout, style);

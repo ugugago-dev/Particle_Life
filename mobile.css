@@ -606,8 +606,8 @@ input[type="range"] {
     transform: translate(-50%, 0);
 }
 
-/* lil-gui (?advanced) はシートより下 */
-.lil-gui.root {
+/* 調整パネル (?advanced) はシートより下 */
+.panel {
     z-index: 3;
 }
 

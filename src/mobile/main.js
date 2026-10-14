@@ -12,6 +12,9 @@ import { createRulesSheet } from './ui/rulesSheet.js';
 import { createSettingsSheet } from './ui/settingsSheet.js';
 import { createImmersive } from './ui/immersive.js';
 import { createToast } from './ui/toast.js';
+import { createMobileGUI } from './mobileGui.js';
+import { applyStyleQuery, rulesFromQuery, shareUrl, copyText } from '../share.js';
+import { createSettingsStore, saveOnHide } from '../settings.js';
 
 const DENSITY = 30;          // N * rMax^2 / A の不変量 (PC 版と同じ近傍密度)
 const DEFAULT_N = 2500;
@@ -21,6 +24,9 @@ const RMAX_RETARGET = 0.2;   // A がこの割合以上変わったら rMax を�
 const QUALITY_WINDOW_MS = 2000;
 const QUALITY_SLOW_MS = 20;
 const QUALITY_SHRINK = 0.8;
+// 再読み込みで残す設定 (粒子数・rMax は自動品質と画面の比率で決まるので残さない)
+const KEPT_SETTINGS = ['renderMode', 'organicStyle', 'particleRadius', 'trails', 'numTypes', 'ruleGenerator'];
+const settings = createSettingsStore('particle-life:mobile-settings', KEPT_SETTINGS);
 
 // sim の生成はここだけ。simClient.js (Worker 版) があればそれ、無い / 失敗なら CpuSimulation
 async function createSimulation() {
@@ -63,25 +69,30 @@ async function main() {
 
     const query = new URLSearchParams(location.search);
     const advanced = query.has('advanced');
-    const initialPreset = PRESETS[Number(query.get('preset')) - 1]; // 1 始まり、無ければ undefined
+    const urlRules = rulesFromQuery(query); // ?rules (共有リンク) は ?preset より優先
+    const initialPreset = urlRules ? undefined : PRESETS[Number(query.get('preset')) - 1]; // 1 始まり、無ければ undefined
     const nQuery = Number(query.get('n'));
     const fixedN = query.has('n') && Number.isFinite(nQuery) && nQuery >= 1; // 指定時は自動品質を切る
     let autoQuality = !fixedN;
 
     const canOrganic = () => !!renderer.capabilities?.organic; // organic 担当が立てる
 
+    // スマホ版の既定 <- 保存した設定 <- URL。organic を描けない端末は常に dots
     const params = createParams();
-    params.renderMode = canOrganic() ? 'organic' : 'dots';
-    params.organicStyle = 'scope';
     params.fieldScale = 0.25;
     params.numParticles = fixedN ? Math.min(Math.round(nQuery), MAX_N) : DEFAULT_N;
     params.substeps = 1;
     params.particleRadius = 1.6;
     params.showMatrix = false;
+    settings.load(params);
+    applyStyleQuery(params, query);
+    if (!canOrganic()) params.renderMode = 'dots';
+    saveOnHide(settings, params);
 
-    const rules = new RuleMatrix(params.numTypes);
-    if (initialPreset) {
-        rules.load(initialPreset.rules);
+    const loaded = urlRules ?? initialPreset?.rules;
+    const rules = new RuleMatrix(loaded ? 0 : params.numTypes, Math.random, params.ruleGenerator);
+    if (loaded) {
+        rules.load(loaded);
         params.numTypes = rules.numTypes;
     }
     const sim = await createSimulation();
@@ -195,6 +206,10 @@ async function main() {
             const ok = await actions.copyRules();
             toast.show(ok ? 'ルールをコピーしました' : 'コンソールに出力しました');
         },
+        onShare: async () => {
+            const ok = await copyText(shareUrl(params, rules));
+            toast.show(ok ? 'リンクをコピーしました' : 'コンソールに出力しました');
+        },
     });
     rulesUi.setActivePreset(initialPreset ? PRESETS.indexOf(initialPreset) : -1);
 
@@ -231,7 +246,7 @@ async function main() {
             settingsUi.sync();
         },
         setNumTypes(n) {
-            rules.resize(n);
+            rules.resize(n, Math.random, params.ruleGenerator);
             palette = createPalette(n);
             sim.setRules(rules);
             rulesDirty = false;
@@ -252,7 +267,7 @@ async function main() {
             settingsUi.sync();
         },
         randomizeRules() {
-            rules.randomize();
+            rules.randomize(Math.random, params.ruleGenerator);
             rulesUi.refresh();
             rulesEdited();
         },
@@ -261,15 +276,8 @@ async function main() {
             rulesUi.refresh();
             rulesEdited();
         },
-        async copyRules() {
-            const text = formatRules(rules);
-            try {
-                await navigator.clipboard.writeText(text);
-                return true;
-            } catch {
-                console.log(text); // クリップボード不可 (非 HTTPS): コンソールから取る
-                return false;
-            }
+        copyRules() {
+            return copyText(formatRules(rules)); // クリップボード不可 (非 HTTPS) ならコンソールに出す
         },
         resetParticles() {
             sim.randomize(sim.count, rules.numTypes);
@@ -277,13 +285,10 @@ async function main() {
     };
 
     if (advanced) {
-        // lil-gui は CDN: 失敗しても本体は動かす
-        import('./mobileGui.js')
-            .then(({ createMobileGUI }) => createMobileGUI(params, { ...actions, copyRules: () => actions.copyRules().then((ok) => toast.show(ok ? 'ルールをコピーしました' : 'コンソールに出力しました')) }))
-            .then((gui) => {
-                ui = gui;
-            })
-            .catch((e) => console.error('mobile GUI could not be loaded', e));
+        ui = createMobileGUI(params, {
+            ...actions,
+            copyRules: () => actions.copyRules().then((ok) => toast.show(ok ? 'ルールをコピーしました' : 'コンソールに出力しました')),
+        });
     }
 
     // ---- 自動品質: 直近 2 秒の平均フレーム時間が 20 ms 超なら粒子を 2 割減らす ----

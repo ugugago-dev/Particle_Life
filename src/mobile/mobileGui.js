@@ -1,7 +1,8 @@
-const LIL_GUI_URL = 'https://cdn.jsdelivr.net/npm/lil-gui@0.20/+esm';
+import { Panel } from '../ui/panel.js';
+import { RULE_GENERATORS } from '../ruleGen.js';
 
 /**
- * スマホ版の調整 GUI (?advanced のときだけ呼ぶ)。読み込みに失敗したら null。
+ * スマホ版の調整パネル (?advanced のときだけ呼ぶ)。
  * @param {object} params
  * @param {{
  *   setNumParticles: (n: number) => void,
@@ -11,21 +12,13 @@ const LIL_GUI_URL = 'https://cdn.jsdelivr.net/npm/lil-gui@0.20/+esm';
  *   copyRules: () => void,
  * }} actions
  */
-export async function createMobileGUI(params, actions) {
-    let GUI;
-    try {
-        ({ default: GUI } = await import(LIL_GUI_URL));
-    } catch (err) {
-        console.error('[mobile GUI] lil-gui を読み込めませんでした', err);
-        return null;
-    }
-
-    const gui = new GUI({ title: 'Particle Life (Mobile)' });
-    gui.close();
+export function createMobileGUI(params, actions) {
+    const gui = new Panel({ title: 'Particle Life (Mobile)', closed: true });
 
     // on release, so dragging does not rebuild every frame
     gui.add(params, 'numParticles', 500, 20000, 500).onFinishChange(actions.setNumParticles);
     gui.add(params, 'numTypes', 1, 12, 1).onFinishChange(actions.setNumTypes);
+    gui.add(params, 'ruleGenerator', RULE_GENERATORS).name('random rules');
     gui.add(params, 'rMax', 0.02, 0.25, 0.0025);
     gui.add({ run: actions.recomputeRMax }, 'run').name('Recompute rMax');
     gui.add({ run: actions.resetParticles }, 'run').name('Reset particles');

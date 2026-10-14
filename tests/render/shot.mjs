@@ -154,7 +154,7 @@ async function run(name, launchOpts, ctxOpts, url, abortPred) {
     const problems = [];
     page.on('console', (m) => { if (['error', 'warning'].includes(m.type())) problems.push(`[${m.type()}] ${m.text()}`); });
     page.on('pageerror', (e) => problems.push(`[pageerror] ${e.message}`));
-    await page.route((u) => !u.href.startsWith(base) || (abortPred && abortPred(u)), (r) => r.abort()); // offline: lil-gui CDN fails fast
+    await page.route((u) => !u.href.startsWith(base) || (abortPred && abortPred(u)), (r) => r.abort()); // offline: nothing outside the local server is loaded
     await page.addInitScript(initScript, seed);
     await page.goto(base + url);
     try {

@@ -1,6 +1,6 @@
 // Wiring only. The state lives on the GPU and is never read back; without WebGPU only a message is shown (no CPU fallback)
 
-import { createParams } from './config.js';
+import { createParams, defaults } from './config.js';
 import { RuleMatrix } from './rules.js';
 import { PRESETS, formatRules } from './presets.js';
 import { createPalette } from './palette.js';
@@ -11,6 +11,12 @@ import { requestGPU, configureCanvas, showUnsupported } from './gpu/device.js';
 import { GpuSimulation } from './gpu/simulation.js';
 import { GpuRenderer } from './gpu/renderer.js';
 import { GpuTimer } from './gpu/timer.js';
+import { createGUI } from './ui/gui.js';
+import { applyStyleQuery, rulesFromQuery, shareUrl, copyText } from './share.js';
+import { createSettingsStore, saveOnHide } from './settings.js';
+
+// every param is kept across reloads except the run / pause state
+const settings = createSettingsStore('particle-life:settings', Object.keys(defaults).filter((k) => k !== 'running'));
 
 async function main() {
     const canvas = document.querySelector('#canvas');
@@ -38,12 +44,20 @@ async function main() {
     }
     const query = new URLSearchParams(location.search);
     const advanced = query.has('advanced'); // public page: basic controls only
-    const initialPreset = PRESETS[Number(query.get('preset')) - 1]; // 1-based, undefined if absent / out of range
+    const urlRules = rulesFromQuery(query); // ?rules (share link) wins over ?preset
+    const initialPreset = urlRules ? undefined : PRESETS[Number(query.get('preset')) - 1]; // 1-based, undefined if absent / out of range
 
+    // defaults <- saved settings <- URL
     const params = createParams();
-    const rules = new RuleMatrix(params.numTypes);
-    if (initialPreset) {
-        rules.load(initialPreset.rules);
+    settings.load(params);
+    applyStyleQuery(params, query);
+    let keepSettings = true;
+    const saveSettings = saveOnHide({ save: (p) => keepSettings && settings.save(p) }, params);
+
+    const loaded = urlRules ?? initialPreset?.rules;
+    const rules = new RuleMatrix(loaded ? 0 : params.numTypes, Math.random, params.ruleGenerator);
+    if (loaded) {
+        rules.load(loaded);
         params.numTypes = rules.numTypes;
     }
     const { pointer } = createInput(canvas);
@@ -52,7 +66,7 @@ async function main() {
     const stats = timer ? new StatsOverlay(timer.enabled) : null;
     let palette = createPalette(params.numTypes);
     let rulesDirty = true;
-    let ui = null; // set once lil-gui has loaded
+    let ui = null; // set once the control panel is built
 
     function resize() {
         const cssW = canvas.clientWidth;
@@ -93,7 +107,7 @@ async function main() {
             sim.randomize(n, rules.numTypes);
         },
         setNumTypes(n) {
-            rules.resize(n);
+            rules.resize(n, Math.random, params.ruleGenerator);
             palette = createPalette(n);
             sim.setRules(rules);
             rulesDirty = false;
@@ -111,7 +125,7 @@ async function main() {
             matrix.rebuild(rules, palette);
         },
         randomizeRules() {
-            rules.randomize();
+            rules.randomize(Math.random, params.ruleGenerator);
             matrix.refresh();
             rulesEdited();
         },
@@ -121,12 +135,16 @@ async function main() {
             rulesEdited();
         },
         async copyRules() {
-            const text = formatRules(rules);
-            try {
-                await navigator.clipboard.writeText(text);
-            } catch {
-                console.log(text); // no clipboard access (insecure context): copy from the console
-            }
+            await copyText(formatRules(rules)); // no clipboard access (insecure context): logged to the console
+        },
+        async shareLink() {
+            const url = shareUrl(params, rules);
+            if (!(await copyText(url))) window.prompt('Share link', url);
+        },
+        resetSettings() {
+            keepSettings = false; // the reload must not save the current values again
+            settings.clear();
+            location.reload();
         },
         resetParticles() {
             sim.randomize(sim.count, rules.numTypes);
@@ -136,13 +154,8 @@ async function main() {
         },
     };
 
-    // lil-gui comes from a CDN: load it last so a network problem cannot hide the WebGPU message
-    try {
-        const { createGUI } = await import('./ui/gui.js');
-        ui = createGUI(params, actions, { advanced, preset: initialPreset?.name });
-    } catch (e) {
-        console.error('lil-gui could not be loaded (offline?). Running without the control panel.', e);
-    }
+    ui = createGUI(params, actions, { advanced, preset: initialPreset?.name });
+    ui.gui.domElement.addEventListener('change', saveSettings); // every committed edit in the panel
 
     function frame(now) {
         if (!alive) return;

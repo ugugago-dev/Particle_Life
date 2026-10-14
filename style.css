@@ -191,3 +191,140 @@ canvas {
     white-space: pre-wrap;
     word-break: break-word;
 }
+
+/* ---- control panel (top-right, src/ui/panel.js) ---- */
+.panel {
+    position: fixed;
+    top: 8px;
+    right: 8px;
+    width: 280px;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+    border-radius: 8px;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    color: var(--text);
+    font: 11px/1.4 system-ui, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+    z-index: 3;
+    scrollbar-width: thin;
+}
+
+.panel-title {
+    padding: 6px 10px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.panel > .panel-title {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--bg);
+    font-size: 12px;
+}
+
+.panel-folder {
+    border-top: 1px solid var(--panel-border);
+}
+
+.panel-folder > .panel-title {
+    color: var(--text-dim);
+}
+
+.panel-folder > .panel-children {
+    padding-left: 6px;
+}
+
+.panel-children {
+    padding-bottom: 4px;
+}
+
+.panel-row {
+    display: grid;
+    grid-template-columns: 40% 1fr;
+    align-items: center;
+    gap: 6px;
+    min-height: 24px;
+    padding: 1px 10px;
+}
+
+.panel-row[hidden] {
+    display: none;
+}
+
+.panel-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-dim);
+}
+
+.panel-widget {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.panel-button {
+    grid-template-columns: 1fr;
+}
+
+.panel input[type="range"] {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    accent-color: #8fc2ff;
+}
+
+.panel input[type="checkbox"] {
+    margin: 0;
+    accent-color: #8fc2ff;
+}
+
+.panel-num,
+.panel select,
+.panel button {
+    box-sizing: border-box;
+    height: 20px;
+    border-radius: 4px;
+    border: 1px solid var(--panel-border);
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text);
+    font: inherit;
+}
+
+.panel-num {
+    width: 52px;
+    padding: 0 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.panel select {
+    flex: 1;
+    min-width: 0;
+}
+
+.panel select option {
+    background: var(--bg);
+}
+
+.panel button {
+    flex: 1;
+    cursor: pointer;
+}
+
+.panel button:hover,
+.panel select:hover {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.panel :focus-visible {
+    outline: 2px solid #8fc2ff;
+    outline-offset: 1px;
+}

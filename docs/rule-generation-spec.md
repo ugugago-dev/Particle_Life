@@ -1,0 +1,66 @@
+# ランダムなルール・共有リンク・設定の保存・調整パネル
+
+PC 版 / スマホ版で共通。シミュレーションと描画は変えない。
+
+## 1. ランダムなルール (`src/ruleGen.js`)
+
+`params.ruleGenerator` (既定 `'lifelike'`) で、`Randomize rules` / スマホのランダム、起動時のルール、種類数を増やしたときの新しい成分の作り方を選ぶ。
+
+| 名前 | 作り方 |
+| --- | --- |
+| `uniform` | 全成分を [-1, 1] の一様乱数 (従来の Particle Life) |
+| `lifelike` | 下記の役割と動機から組み立てる。細胞のような体・膜・泳ぐものが出やすく、全体が 1 つの塊・ガスになりにくい |
+
+`rules[i][j]` = 種類 i が種類 j に引かれる (+) / 押される (-) 強さ (従来どおり)。
+
+### lifelike
+
+1. 背景: 全成分を ±0.1 の一様乱数 (弱い相互作用)。
+2. 種類ごとの役割 (対角 = 自分自身への反応)。少なくとも 1 種類は body にする。
+
+   | 役割 | 確率 | 対角 | 意味 |
+   | --- | --- | --- | --- |
+   | body | 0.6 | 0.4〜0.9 | 自分にくっつく: 細胞質・核 |
+   | shell | 0.3 | -0.4〜0.05 | 自分にくっつかない: 好きな相手の周りに層として広がる (膜) |
+   | drifter | 0.1 | -0.2〜0.25 | どちらでもない |
+
+3. 種類の組 (a, b) ごとに動機を 1 つ (向きはランダム)。
+
+   | 動機 | 確率 | 値 | 見え方 |
+   | --- | --- | --- | --- |
+   | none | 0.28 | 背景のまま | |
+   | coat | 0.3 | a→b 0.4〜0.85、b→a -0.1〜0.3 (body と body 以外なら body 以外が a) | b を a が包む (膜) |
+   | chase | 0.26 | a→b 0.3〜0.8、b→a -0.2〜-0.7 | 追う / 逃げる組: 動く (泳ぐ) |
+   | avoid | 0.16 | 両方 -0.2〜-0.6 | 体どうしを離す (1 つの大きな塊にならない) |
+
+4. 確率 0.4 (種類が 3 以上) で、ランダムに選んだ 3〜5 種類の環 c0→c1→…→c0 を足す: 前へ 0.5〜0.9、後ろへ -0.4〜0。虫・回る輪。
+5. 最後に 0.05 刻みに丸める (コピーしたルールが読みやすい)。
+
+確率と範囲は CPU 版のシミュレーション (4000 粒子、800 ステップ、6 種類) の点描を seed ごとに並べて、uniform と見比べて決めた。uniform は殻だけの輪・ガス・縞の塊が多く、lifelike は核と膜をもつ複数色の体が多く、ガスが少ない。
+
+## 2. URL と共有リンク (`src/share.js`)
+
+| クエリ | 意味 |
+| --- | --- |
+| `?style=scope\|glass\|cell\|dots` | 見た目。dots は `renderMode = 'dots'`、ほかは organic でそのスタイル。不正な値は無視。スマホ版は cell を scope として描く |
+| `?rules=<base64url>` | ルール行列。n x n の符号付きバイト (値 x 100、行優先)。n = 長さの平方根 (1〜16)。不正なら無視 |
+| `?preset=1..6` | プリセット (`?rules` があればそちらが優先) |
+
+- 共有リンク = 今のページの URL から `advanced` / `desktop` / `n` だけ残し、`style` と `rules` を付けたもの (値の無い `?advanced` は `=` を付けない)。PC はパネルの `Copy share link`、スマホはルールシートの `リンク`。クリップボードが使えなければ PC は `prompt` で表示、スマホはコンソールへ。
+- 優先順位: 既定 < 保存した設定 < URL。
+
+## 3. 設定の保存 (`src/settings.js`)
+
+- localStorage に**既定と違う値だけ**を JSON で保存する (あとで既定を変えたとき、触っていない人にも新しい既定が届く)。
+- PC (`particle-life:settings`): `running` 以外の全パラメータ。スマホ (`particle-life:mobile-settings`): `renderMode` `organicStyle` `particleRadius` `trails` `numTypes` `ruleGenerator` (粒子数・rMax は自動品質と画面の比率で決まるので残さない)。
+- 保存のタイミング: ページが隠れたとき (`visibilitychange`) と閉じるとき (`pagehide`)。PC はパネルで値を確定したときも。
+- 読み込みは型と選択肢を確かめる (不正な値・廃止したスタイル名は捨てる)。localStorage が使えない (プライベートモードなど) ときは保存しないだけで動く。
+- PC のパネルの `Reset settings` で保存を消して再読み込みする (重すぎる粒子数などで困ったとき)。
+
+## 4. 調整パネル (`src/ui/panel.js`)
+
+lil-gui (CDN) をやめて自作した。オフラインでも出る。見た目は `style.css` (`.panel` 以下、画面右上に固定、`<details>` で開閉)。
+
+- API は lil-gui のうちこのプロジェクトが使っていた部分: `new Panel({title, closed})`、`add(obj, prop, min, max, step)` (スライダ + 数値入力)、`add(obj, prop, [選択肢])` (select)、真偽値 → チェックボックス、関数 → ボタン、`addFolder`、`controllersRecursive`、`open` / `close`。コントローラは `name` / `onChange` / `onFinishChange` / `show` / `updateDisplay`。
+- スライダはドラッグ中に `onChange`、離したときに `onFinishChange`。数値入力は Enter / フォーカスを外したときに step に丸め、範囲に収めて確定 (`onChange` と `onFinishChange`)。↑↓ で 1 step (Shift で 10 step)。
+- 値が確定すると `change` イベントが `.panel` まで上がる (PC はこれで設定を保存する)。
