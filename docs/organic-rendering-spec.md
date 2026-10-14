@@ -114,7 +114,7 @@ scope のスプラットは 0.2 (= 0.4 x 0.5)。粒 (ごみ) 対策のために�
 
 以下 `m` = small ぼかし後の `a`、`n` = large ぼかし後の `a`、`C` = `rgb / a` (種類の平均色)。`tinted(base, C, k)` は明るさを保って色相を C へ `k` だけ寄せる。
 
-### glass (既定)
+### glass
 
 平らな 2D イラスト風の細胞 (3D 的なライティングはしない)。背景は青、体は一定の淡い水色の半透明、縁は白い線、核は種類の色の平らな塊。
 **色の意味は核だけ** (体・膜には種類の色を混ぜない)。`m` / `n` = 核の指標 (shape) の small / large ぼかし、`Cs = s.rgb / s.a` = small ぼかしの加重平均色 (細かい)。
@@ -128,7 +128,7 @@ scope のスプラットは 0.2 (= 0.4 x 0.5)。粒 (ごみ) 対策のために�
 - 画面固定のノイズ・スペキュラ・陰影・屈折・ビネット・外側の輪は使わない (動いても揺らがない)。
 - glass は細かい場 (スプラット 0.3 倍、small ぼかし 0.3 倍)。large ぼかしは縮めない (体の輪郭に使うため)。
 
-### scope
+### scope (既定)
 
 明視野の光学顕微鏡の像。淡い透過光の背景、細い壁で囲まれた半透明の細胞、染色された丸い小器官。**種類 (色) が一目で区別できること**が必須条件。
 `s` = small ぼかし (`m = s.a`、shape = occupancy。`threshold` が効く)、`l` = large ぼかし (`n = l.a`、softLarge の soft 整形。`threshold` に依存しない)。色はぼかした色の平均ではなく、種類を復元してパレットの正確な染色で塗る (`docs/scope-species-spec.md` のフェーズ 1):
@@ -184,7 +184,7 @@ scope のスプラットは 0.2 (= 0.4 x 0.5)。粒 (ごみ) 対策のために�
 | パラメータ | 既定 | 範囲 (GUI) | 意味 |
 |---|---|---|---|
 | `renderMode` | `'organic'` | `dots` / `organic` | |
-| `organicStyle` | `'glass'` | `glass` / `cell` / `scope` | スタイル固有の項目 (`blurLarge` / `speciesTint` を含む) は、そのスタイルが読むときだけ GUI に出る。表にないスタイル名 (廃止した glow / bands / mono など) は glass として描く |
+| `organicStyle` | `'scope'` | `glass` / `cell` / `scope` | スタイル固有の項目 (`blurLarge` / `speciesTint` を含む) は、そのスタイルが読むときだけ GUI に出る。表にないスタイル名 (廃止した glow / bands / mono など) は glass として描く |
 | `fieldScale` | 0.5 | 0.25 / 0.5 / 1 | field の解像度 (canvas に対する比)。重い場合は下げる |
 | `splatRadius` | 0.5 | 0.2〜1.5 | スプラット半径 (x rMax) |
 | `fieldGain` | 1 | 0.2〜4 | 正規化した場への倍率 (全スタイル) |

@@ -5,6 +5,11 @@
 const FINE_NONE = { splat: 1, small: 1, large: 1 };
 
 export const ORGANIC_STYLES = {
+    scope: {
+        index: 2, fine: { splat: 0.4, small: 0.4, large: 1 }, shape: 'occupancy', granules: false, paper: true,
+        params: ['threshold', 'blurLarge', 'scopeStain', 'scopeVignette', 'scopeSpeck', 'scopeIsolation', 'scopeDensity'],
+        thresholdScale: 1.6, softLarge: true,
+    },
     glass: {
         index: 1, fine: { splat: 0.3, small: 0.3, large: 1 }, shape: 'nucleus', granules: false, paper: false,
         params: ['coreThreshold', 'blurLarge', 'rimStrength'],
@@ -12,11 +17,6 @@ export const ORGANIC_STYLES = {
     cell: {
         index: 0, fine: FINE_NONE, shape: 'occupancy', granules: true, paper: true,
         params: ['threshold', 'nucleusThreshold', 'blurLarge', 'speciesTint'],
-    },
-    scope: {
-        index: 2, fine: { splat: 0.4, small: 0.4, large: 1 }, shape: 'occupancy', granules: false, paper: true,
-        params: ['threshold', 'blurLarge', 'scopeStain', 'scopeVignette', 'scopeSpeck', 'scopeIsolation', 'scopeDensity'],
-        thresholdScale: 1.6, softLarge: true,
     },
 };
 

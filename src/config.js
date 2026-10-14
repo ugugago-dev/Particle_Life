@@ -37,7 +37,7 @@ export const defaults = Object.freeze({
 
     // organic rendering (docs/organic-rendering-spec.md). The field reads 1 at the mean density; thresholds are tuned to its measured density
     renderMode: 'organic',   // 'dots' | 'organic'
-    organicStyle: 'glass',   // 'glass' | 'cell' | 'scope'
+    organicStyle: 'scope',   // 'scope' | 'glass' | 'cell'
     fieldScale: 0.5,         // field resolution / canvas
     splatRadius: 0.5,        // x rMax
     fieldGain: 1,
