@@ -53,9 +53,10 @@ PC 版 / スマホ版で共通。シミュレーションと描画は変えな�
 
 - localStorage に**既定と違う値だけ**を JSON で保存する (あとで既定を変えたとき、触っていない人にも新しい既定が届く)。
 - PC (`particle-life:settings`): `running` 以外の全パラメータ。スマホ (`particle-life:mobile-settings`): `renderMode` `organicStyle` `particleRadius` `trails` `numTypes` `ruleGenerator` (粒子数・rMax は自動品質と画面の比率で決まるので残さない)。
-- 保存のタイミング: ページが隠れたとき (`visibilitychange`) と閉じるとき (`pagehide`)。PC はパネルで値を確定したときも。
+- 保存のタイミング: ページが隠れたとき (`visibilitychange`) と閉じるとき (`pagehide`)。PC はパネルで値を確定したとき、スマホはシートを閉じたときも。
 - 読み込みは型と選択肢を確かめる (不正な値・廃止したスタイル名は捨てる)。localStorage が使えない (プライベートモードなど) ときは保存しないだけで動く。
-- PC のパネルの `Reset settings` で保存を消して再読み込みする (重すぎる粒子数などで困ったとき)。
+- PC のパネルの `Reset settings`、スマホの設定シートの `設定を初期化` で保存を消して再読み込みする (重すぎる粒子数などで困ったとき)。
+- 見た目とランダムの作り方は PC・スマホとも普段の UI で選べる (PC: パネルの `organic style` / `random rules`、スマホ: 設定シートの `描画` / `ランダムのルール`)。
 
 ## 4. 調整パネル (`src/ui/panel.js`)
 

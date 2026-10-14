@@ -1,4 +1,4 @@
-// 設定シート: 品質 (粒子数 / 自動品質)、描画 (点 / 有機)、粒子の大きさ、軌跡、種類数、リセット
+// 設定シート: 品質 (粒子数 / 自動品質)、描画 (点 / 顕微鏡 / ガラス)、粒子の大きさ、軌跡、種類数、ランダムの作り方、リセット
 
 import { BottomSheet } from './sheet.js';
 import { actionButton, section, segmented, slider, toggle } from './controls.js';
@@ -7,7 +7,8 @@ import { icon } from './icons.js';
 /**
  * @param {{params: object, onChange: (open: boolean) => void, canOrganic: () => boolean,
  *   getAuto: () => boolean, setAuto: (v: boolean) => void,
- *   setNumParticles: (n: number) => void, setNumTypes: (n: number) => void, reset: () => void}} o
+ *   setNumParticles: (n: number) => void, setNumTypes: (n: number) => void, reset: () => void,
+ *   resetSettings: () => void}} o
  */
 export function createSettingsSheet(o) {
     const { params } = o;
@@ -38,13 +39,16 @@ export function createSettingsSheet(o) {
     const view = section('描画');
     const mode = segmented({
         label: '表示',
+        // PC 版の organic style のうちスマホで描けるもの (cell は scope として描く)
         options: [
             { value: 'dots', label: '点' },
-            { value: 'organic', label: '有機', disabled: () => !o.canOrganic() },
+            { value: 'scope', label: '顕微鏡', disabled: () => !o.canOrganic() },
+            { value: 'glass', label: 'ガラス', disabled: () => !o.canOrganic() },
         ],
-        get: () => params.renderMode,
+        get: () => (params.renderMode === 'dots' ? 'dots' : params.organicStyle === 'glass' ? 'glass' : 'scope'),
         set: (v) => {
-            params.renderMode = v;
+            params.renderMode = v === 'dots' ? 'dots' : 'organic';
+            if (v !== 'dots') params.organicStyle = v;
         },
     });
     const radius = slider({
@@ -80,11 +84,25 @@ export function createSettingsSheet(o) {
             o.setNumTypes(v);
         },
     });
-    world.append(types.el);
+    const generator = segmented({
+        label: 'ランダムのルール',
+        options: [
+            { value: 'lifelike', label: '生物らしい' },
+            { value: 'uniform', label: '一様' },
+        ],
+        get: () => params.ruleGenerator,
+        set: (v) => {
+            params.ruleGenerator = v;
+        },
+    });
+    world.append(types.el, generator.el);
 
     sheet.body.append(quality, view, world);
-    sheet.setFooter(actionButton('粒子をリセット', icon('reset', 20), o.reset, 'wide'));
+    sheet.setFooter(
+        actionButton('粒子をリセット', icon('reset', 20), o.reset),
+        actionButton('設定を初期化', icon('zero', 20), o.resetSettings),
+    );
 
-    const controls = [count, auto, mode, radius, trails, types];
+    const controls = [count, auto, mode, radius, trails, types, generator];
     return { sheet, sync: () => controls.forEach((c) => c.sync()), controls };
 }
