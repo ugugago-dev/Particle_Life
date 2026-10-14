@@ -1,6 +1,8 @@
-import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.20/+esm';
+import { Panel } from './panel.js';
+import { defaults } from '../config.js';
 import { ORGANIC_STYLES } from '../organicStyles.js';
 import { PRESETS } from '../presets.js';
+import { RULE_GENERATORS } from '../ruleGen.js';
 
 const CUSTOM = '(custom)';
 
@@ -16,17 +18,19 @@ const CUSTOM = '(custom)';
  *   resetParticles: () => void,
  *   zeroRules: () => void,
  *   copyRules: () => void,
+ *   shareLink: () => void,
+ *   resetSettings: () => void,
  *   setMatrixVisible: (visible: boolean) => void,
  * }} actions
  * @param {{advanced?: boolean, preset?: string}} [options] `preset`: name of the preset already loaded
  */
 export function createGUI(params, actions, { advanced = false, preset = CUSTOM } = {}) {
-    const gui = new GUI({ title: 'Particle Life' });
+    const gui = new Panel({ title: 'Particle Life' });
     const state = { preset };
     const styleControls = {}; // advanced only
 
     function showStyleControls() {
-        const used = (ORGANIC_STYLES[params.organicStyle] ?? ORGANIC_STYLES.glass).params;
+        const used = (ORGANIC_STYLES[params.organicStyle] ?? ORGANIC_STYLES[defaults.organicStyle]).params;
         for (const [name, controller] of Object.entries(styleControls)) controller.show(used.includes(name));
     }
 
@@ -38,6 +42,7 @@ export function createGUI(params, actions, { advanced = false, preset = CUSTOM }
             gui.controllersRecursive().forEach((c) => c.updateDisplay()); // numTypes changed
         });
     gui.add({ run: actions.randomizeRules }, 'run').name('Randomize rules');
+    gui.add(params, 'ruleGenerator', RULE_GENERATORS).name('random rules');
     gui.add({ run: actions.resetParticles }, 'run').name('Reset particles');
     gui.add(params, 'running');
     // on release, so dragging does not rebuild every frame
@@ -46,6 +51,8 @@ export function createGUI(params, actions, { advanced = false, preset = CUSTOM }
     gui.add(params, 'renderMode', ['dots', 'organic']);
     gui.add(params, 'organicStyle', Object.keys(ORGANIC_STYLES)).name('organic style').onChange(showStyleControls);
     gui.add(params, 'showMatrix').name('Show matrix').onChange(actions.setMatrixVisible);
+    gui.add({ run: actions.shareLink }, 'run').name('Copy share link');
+    gui.add({ run: actions.resetSettings }, 'run').name('Reset settings');
 
     if (advanced) {
         const sim = gui.addFolder('Simulation');

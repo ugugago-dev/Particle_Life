@@ -1,4 +1,4 @@
-// ルールシート: プリセットのチップ + 行列エディタ (タッチ版) + ランダム / ゼロ / コピー
+// ルールシート: プリセットのチップ + 行列エディタ (タッチ版) + ランダム / ゼロ / コピー / リンク
 
 import { PRESETS } from '../../presets.js';
 import { MatrixEditor } from '../../ui/matrixEditor.js';
@@ -11,7 +11,7 @@ const CELL_MAX = 34;
 
 /**
  * @param {{rules: object, palette: object, onEdited: () => void, onChange: (open: boolean) => void,
- *   onPreset: (preset: object, index: number) => void, onRandom: () => void, onZero: () => void, onCopy: () => void}} o
+ *   onPreset: (preset: object, index: number) => void, onRandom: () => void, onZero: () => void, onCopy: () => void, onShare: () => void}} o
  */
 export function createRulesSheet(o) {
     const sheet = new BottomSheet({ id: 'sheet-rules', title: 'ルール', onChange: o.onChange });
@@ -52,6 +52,7 @@ export function createRulesSheet(o) {
         actionButton('ランダム', icon('dice', 20), o.onRandom),
         actionButton('ゼロ', icon('zero', 20), o.onZero),
         actionButton('コピー', icon('copy', 20), o.onCopy),
+        actionButton('リンク', icon('link', 20), o.onShare),
     );
 
     // セルの大きさを幅に合わせる (28px 未満にはせず、足りなければ横スクロール)
