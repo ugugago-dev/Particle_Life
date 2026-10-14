@@ -87,7 +87,9 @@ async function main() {
     settings.load(params);
     applyStyleQuery(params, query);
     if (!canOrganic()) params.renderMode = 'dots';
-    saveOnHide(settings, params);
+    if (params.organicStyle !== 'glass') params.organicStyle = 'scope'; // スマホは glass / scope だけ (cell は scope で描く)
+    let keepSettings = true;
+    const saveSettings = saveOnHide({ save: (p) => keepSettings && settings.save(p) }, params);
 
     const loaded = urlRules ?? initialPreset?.rules;
     const rules = new RuleMatrix(loaded ? 0 : params.numTypes, Math.random, params.ruleGenerator);
@@ -174,7 +176,10 @@ async function main() {
         return (open) => {
             sheetOpen = open;
             toolbar.setSheet(open ? name : null);
-            if (!open) immersive.poke();
+            if (!open) {
+                immersive.poke();
+                saveSettings(); // シートで変えた値をすぐ残す (PC のパネルの確定と同じ)
+            }
         };
     }
 
@@ -225,6 +230,11 @@ async function main() {
         setNumParticles: (n) => actions.setNumParticles(n),
         setNumTypes: (n) => actions.setNumTypes(n),
         reset: () => actions.resetParticles(),
+        resetSettings: () => {
+            keepSettings = false; // 再読み込みで今の値を保存し直さない
+            settings.clear();
+            location.reload();
+        },
     });
 
     // フレームごとに使い回す
