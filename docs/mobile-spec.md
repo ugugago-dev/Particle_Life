@@ -152,7 +152,7 @@ export function createMobileGUI(params, actions)   // src/ui/panel.js の Panel 
 // actions = { setNumParticles(n), setNumTypes(n), recomputeRMax(), resetParticles(), copyRules() }
 ```
 
-出す項目: `numParticles` (500〜20000, step 500, 離したとき)、`numTypes` (1〜12)、`ruleGenerator` (`random rules`: lifelike / uniform)、`rMax` (0.02〜0.25)、`forceFactor`、`frictionHalfLife`、`dt`、`substeps` (1〜4)、`particleRadius` (0.5〜6)、`trails`、`pointerRadius`、`pointerStrength`、`limitPressure` / `pressureStrength`、`viscosity`、`Copy rules`。
+出す項目: `numParticles` (500〜20000, step 500, 離したとき)、`numTypes` (1〜12)、`ruleGenerator` (`random rules`: lifelike / strong / uniform)、`ruleExponent` (`strength (^n)`、1〜6)、`rMax` (0.02〜0.25)、`forceFactor`、`frictionHalfLife`、`dt`、`substeps` (1〜4)、`particleRadius` (0.5〜6)、`trails`、`pointerRadius`、`pointerStrength`、`limitPressure` / `pressureStrength`、`viscosity`、`Copy rules`。
 
 ## mobile/main.js の結線
 
@@ -211,7 +211,7 @@ PC 版の organic (`docs/organic-rendering-spec.md`) は WebGPU の MRT・rgba16
 - **ツールバー**: 絵文字 / 文字でなく **インライン SVG のアイコン** (再生/停止、引く/押す、ルール、設定)。ラベルは小さく併記。主操作は 4〜5 個まで。`引く/押す` はポインタ円と同じ色 (緑 / 赤) で状態が分かる。
 - **ボトムシート**: `ルール` と `設定` は画面下から出るシート (ドラッグで閉じる、背景タップで閉じる、`prefers-reduced-motion` を尊重)。シートの高さは内容に応じ、画面の 60% まで。
   - ルールシート: 行列エディタ (タッチ版) + `🎲 ランダム` `ゼロ` `コピー` `リンク` (共有リンクをコピー。`docs/rule-generation-spec.md`) + プリセットを**横スクロールのチップ**で (`select` はやめる)。ランダムは `params.ruleGenerator` (既定 lifelike) で作る。
-  - 設定シート: 品質 (`粒子数` スライダ、`自動品質` スイッチ)、`描画` (`点 / 顕微鏡 / ガラス` のセグメント = dots / scope / glass)、`粒子の大きさ`、`軌跡`、`種類数`、`ランダムのルール` (`生物らしい / 一様` = `ruleGenerator`)、`粒子をリセット`・`設定を初期化` (保存した設定を消して再読み込み)。`?advanced` のときだけ詳細 (調整パネル) を追加。表示・粒子の大きさ・軌跡・種類数・ランダムの作り方 (`renderMode` `organicStyle` `particleRadius` `trails` `numTypes` `ruleGenerator`) は再読み込みしても残す (localStorage `particle-life:mobile-settings`。粒子数・rMax は自動品質と画面の比率で決まるので残さない)。
+  - 設定シート: 品質 (`粒子数` スライダ、`自動品質` スイッチ)、`描画` (`点 / 顕微鏡 / ガラス` のセグメント = dots / scope / glass)、`粒子の大きさ`、`軌跡`、`種類数`、`ランダムのルール` (`生物らしい / 強い / 一様` = `ruleGenerator`)、`粒子をリセット`・`設定を初期化` (保存した設定を消して再読み込み)。`?advanced` のときだけ詳細 (調整パネル) を追加。表示・粒子の大きさ・軌跡・種類数・ランダムの作り方 (`renderMode` `organicStyle` `particleRadius` `trails` `numTypes` `ruleGenerator` `ruleExponent`) は再読み込みしても残す (localStorage `particle-life:mobile-settings`。粒子数・rMax は自動品質と画面の比率で決まるので残さない)。
 - **没入モード**: 操作が 4 秒無いとツールバーが薄くなって隠れ (画面の端のタップで戻る)、ステータス表示も消える。ダブルタップや誤タップで物理ポインタを起こさない (UI 上のタップは canvas に届かない)。
 - **フィードバック**: 自動品質で粒子数を減らしたら小さなトースト (「軽くしました: 2000 粒子」)。WebGL2 非対応・context lost のメッセージも同じ体裁。
 - **見た目**: ダーク背景に合わせ、半透明パネル (backdrop-filter はあれば使う) と 12px 角丸、フォントは system-ui、タップ領域は 44px 以上、コントラスト AA、`env(safe-area-inset-*)` を全方向で考慮。縦・横の両方で破綻しない (横は左右どちらかの端にシートを出してもよい)。

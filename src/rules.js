@@ -4,12 +4,13 @@ import { generateRules } from './ruleGen.js';
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
-// `kind` ('uniform' | 'lifelike', see ruleGen.js) picks how random entries are made; the app passes params.ruleGenerator
+// `kind` ('uniform' | 'lifelike' | 'strong', see ruleGen.js) picks how random entries are made, `exponent` is for 'strong';
+// the app passes params.ruleGenerator / params.ruleExponent
 export class RuleMatrix {
-    constructor(numTypes, rng = Math.random, kind = 'uniform') {
+    constructor(numTypes, rng = Math.random, kind = 'uniform', exponent = undefined) {
         this.numTypes = 0;
         this.data = new Float32Array(0);
-        this.resize(numTypes, rng, kind);
+        this.resize(numTypes, rng, kind, exponent);
     }
 
     get(i, j) {
@@ -22,8 +23,8 @@ export class RuleMatrix {
         return this.data[k];
     }
 
-    randomize(rng = Math.random, kind = 'uniform') {
-        this.data.set(generateRules(kind, this.numTypes, rng));
+    randomize(rng = Math.random, kind = 'uniform', exponent = undefined) {
+        this.data.set(generateRules(kind, this.numTypes, rng, exponent));
     }
 
     zero() {
@@ -39,10 +40,10 @@ export class RuleMatrix {
     }
 
     /** Keeps the overlapping top-left block; new entries are random. */
-    resize(numTypes, rng = Math.random, kind = 'uniform') {
+    resize(numTypes, rng = Math.random, kind = 'uniform', exponent = undefined) {
         const old = this.data;
         const oldN = Math.min(this.numTypes, numTypes);
-        const data = numTypes > this.numTypes ? generateRules(kind, numTypes, rng) : new Float32Array(numTypes * numTypes);
+        const data = numTypes > this.numTypes ? generateRules(kind, numTypes, rng, exponent) : new Float32Array(numTypes * numTypes);
         for (let i = 0; i < oldN; i++) {
             for (let j = 0; j < oldN; j++) data[i * numTypes + j] = old[i * this.numTypes + j];
         }

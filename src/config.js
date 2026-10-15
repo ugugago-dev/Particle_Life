@@ -3,7 +3,8 @@
 export const defaults = Object.freeze({
     numParticles: 60000,     // GPU version (the CPU version used 3000)
     numTypes: 6,
-    ruleGenerator: 'lifelike', // 'lifelike' | 'uniform': how random rules are made (src/ruleGen.js)
+    ruleGenerator: 'lifelike', // 'lifelike' | 'strong' | 'uniform': how random rules are made (src/ruleGen.js)
+    ruleExponent: 3,         // 'strong': |value| = 1 - (1 - u)^ruleExponent (larger = more entries near ±1)
 
     // force model
     rMax: 0.03,              // interaction radius (keep N * rMax^2 ~ 30: same neighbour density as the CPU default 3000 / 0.1)
