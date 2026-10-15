@@ -25,7 +25,7 @@ const QUALITY_WINDOW_MS = 2000;
 const QUALITY_SLOW_MS = 20;
 const QUALITY_SHRINK = 0.8;
 // 再読み込みで残す設定 (粒子数・rMax は自動品質と画面の比率で決まるので残さない)
-const KEPT_SETTINGS = ['renderMode', 'organicStyle', 'particleRadius', 'trails', 'numTypes', 'ruleGenerator'];
+const KEPT_SETTINGS = ['renderMode', 'organicStyle', 'particleRadius', 'trails', 'numTypes', 'ruleGenerator', 'ruleExponent'];
 const settings = createSettingsStore('particle-life:mobile-settings', KEPT_SETTINGS);
 
 // sim の生成はここだけ。simClient.js (Worker 版) があればそれ、無い / 失敗なら CpuSimulation
@@ -92,7 +92,7 @@ async function main() {
     const saveSettings = saveOnHide({ save: (p) => keepSettings && settings.save(p) }, params);
 
     const loaded = urlRules ?? initialPreset?.rules;
-    const rules = new RuleMatrix(loaded ? 0 : params.numTypes, Math.random, params.ruleGenerator);
+    const rules = new RuleMatrix(loaded ? 0 : params.numTypes, Math.random, params.ruleGenerator, params.ruleExponent);
     if (loaded) {
         rules.load(loaded);
         params.numTypes = rules.numTypes;
@@ -256,7 +256,7 @@ async function main() {
             settingsUi.sync();
         },
         setNumTypes(n) {
-            rules.resize(n, Math.random, params.ruleGenerator);
+            rules.resize(n, Math.random, params.ruleGenerator, params.ruleExponent);
             palette = createPalette(n);
             sim.setRules(rules);
             rulesDirty = false;
@@ -277,7 +277,7 @@ async function main() {
             settingsUi.sync();
         },
         randomizeRules() {
-            rules.randomize(Math.random, params.ruleGenerator);
+            rules.randomize(Math.random, params.ruleGenerator, params.ruleExponent);
             rulesUi.refresh();
             rulesEdited();
         },

@@ -1,7 +1,9 @@
 // Random rule matrices. 'uniform' = every entry in [-1, 1] (the classic Particle Life). 'lifelike' = built from motifs
-// that tend to make cell-like bodies, membranes and things that swim, instead of one big blob or a gas (docs/rule-generation-spec.md)
+// that tend to make cell-like bodies, membranes and things that swim, instead of one big blob or a gas. 'strong' = lifelike with
+// every value pushed toward ±1 (smaller, tighter cells) (docs/rule-generation-spec.md)
 
-export const RULE_GENERATORS = ['lifelike', 'uniform'];
+export const RULE_GENERATORS = ['lifelike', 'strong', 'uniform'];
+export const DEFAULT_RULE_EXPONENT = 3;
 
 const NOISE = 0.1;            // |value| of the background entries (pairs without a motif)
 const STEP = 0.05;            // values are rounded to this so copied rules stay readable
@@ -32,6 +34,16 @@ function pick(table, rng) {
 }
 
 const between = (rng, [lo, hi]) => lo + (hi - lo) * rng();
+
+// 'strong': every motif / role value is pushed toward ±1. |v| = 1 - (1 - u)^exponent (exponent 3: about half of all entries are
+// 0.7..1), never below the weaker end of a one-signed range; the sign is the sign of the range's stronger end
+function exaggerated(exponent) {
+    return (rng, [lo, hi]) => {
+        const strongEnd = Math.abs(lo) > Math.abs(hi) ? lo : hi;
+        const minMag = Math.sign(lo) === Math.sign(hi) ? Math.min(Math.abs(lo), Math.abs(hi)) : 0;
+        return (Math.sign(strongEnd) || 1) * Math.max(1 - Math.pow(1 - rng(), exponent), minMag);
+    };
+}
 const quantize = (v) => Math.max(-1, Math.min(1, Math.round(v / STEP) * STEP));
 
 function shuffled(n, rng) {
@@ -46,16 +58,18 @@ function shuffled(n, rng) {
 /**
  * @param {number} n number of types
  * @param {() => number} [rng]
+ * @param {number} [exponent] 0 = lifelike, > 0 = strong with this exponent
  * @returns {Float32Array} n x n, row i = how type i reacts to each type j
  */
-export function lifelikeRules(n, rng = Math.random) {
+export function lifelikeRules(n, rng = Math.random, exponent = 0) {
+    const value = exponent > 0 ? exaggerated(exponent) : between;
     const m = new Float32Array(n * n);
     const set = (i, j, v) => { m[i * n + j] = v; };
     for (let k = 0; k < m.length; k++) m[k] = (rng() * 2 - 1) * NOISE;
 
     const roles = Array.from({ length: n }, () => pick(ROLES, rng));
     if (!roles.some((r) => r.role === 'body')) roles[Math.floor(rng() * n)] = ROLES[0];
-    roles.forEach((r, i) => set(i, i, between(rng, r.self)));
+    roles.forEach((r, i) => set(i, i, value(rng, r.self)));
 
     for (let i = 0; i < n; i++) {
         for (let j = i + 1; j < n; j++) {
@@ -64,17 +78,17 @@ export function lifelikeRules(n, rng = Math.random) {
                 case 'coat': {
                     // the non-body one coats the body one when there is a choice
                     const [s, t] = roles[a].role === 'body' && roles[b].role !== 'body' ? [b, a] : [a, b];
-                    set(s, t, between(rng, [0.4, 0.85]));
-                    set(t, s, between(rng, [-0.1, 0.3]));
+                    set(s, t, value(rng, [0.4, 0.85]));
+                    set(t, s, value(rng, [-0.1, 0.3]));
                     break;
                 }
                 case 'chase':
-                    set(a, b, between(rng, [0.3, 0.8]));
-                    set(b, a, -between(rng, [0.2, 0.7]));
+                    set(a, b, value(rng, [0.3, 0.8]));
+                    set(b, a, -value(rng, [0.2, 0.7]));
                     break;
                 case 'avoid':
-                    set(a, b, -between(rng, [0.2, 0.6]));
-                    set(b, a, -between(rng, [0.2, 0.6]));
+                    set(a, b, -value(rng, [0.2, 0.6]));
+                    set(b, a, -value(rng, [0.2, 0.6]));
                     break;
                 default:
                     break;
@@ -87,8 +101,8 @@ export function lifelikeRules(n, rng = Math.random) {
         const c = shuffled(n, rng).slice(0, len);
         for (let k = 0; k < len; k++) {
             const a = c[k], b = c[(k + 1) % len];
-            set(a, b, between(rng, [0.5, 0.9]));
-            set(b, a, between(rng, [-0.4, 0]));
+            set(a, b, value(rng, [0.5, 0.9]));
+            set(b, a, value(rng, [-0.4, 0]));
         }
     }
 
@@ -101,7 +115,11 @@ export function uniformRules(n, rng = Math.random) {
     return Float32Array.from({ length: n * n }, () => rng() * 2 - 1);
 }
 
-/** @param {'lifelike' | 'uniform'} kind unknown names fall back to 'lifelike' */
-export function generateRules(kind, n, rng = Math.random) {
-    return kind === 'uniform' ? uniformRules(n, rng) : lifelikeRules(n, rng);
+/**
+ * @param {'lifelike' | 'strong' | 'uniform'} kind unknown names fall back to 'lifelike'
+ * @param {number} [exponent] 'strong' only: larger = more entries near ±1 (1 = uniform magnitudes)
+ */
+export function generateRules(kind, n, rng = Math.random, exponent = DEFAULT_RULE_EXPONENT) {
+    if (kind === 'uniform') return uniformRules(n, rng);
+    return lifelikeRules(n, rng, kind === 'strong' ? Math.max(exponent, 1) : 0);
 }

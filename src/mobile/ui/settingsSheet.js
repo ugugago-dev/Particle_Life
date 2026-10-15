@@ -1,4 +1,4 @@
-// 設定シート: 品質 (粒子数 / 自動品質)、描画 (点 / 顕微鏡 / ガラス)、粒子の大きさ、軌跡、種類数、ランダムの作り方、リセット
+// 設定シート: 品質 (粒子数 / 自動品質)、描画 (点 / 顕微鏡 / ガラス)、粒子の大きさ、軌跡、種類数、ランダムの作り方 (生物らしい / 強い / 一様)、リセット
 
 import { BottomSheet } from './sheet.js';
 import { actionButton, section, segmented, slider, toggle } from './controls.js';
@@ -88,6 +88,7 @@ export function createSettingsSheet(o) {
         label: 'ランダムのルール',
         options: [
             { value: 'lifelike', label: '生物らしい' },
+            { value: 'strong', label: '強い' },
             { value: 'uniform', label: '一様' },
         ],
         get: () => params.ruleGenerator,

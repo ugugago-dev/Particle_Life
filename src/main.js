@@ -55,7 +55,7 @@ async function main() {
     const saveSettings = saveOnHide({ save: (p) => keepSettings && settings.save(p) }, params);
 
     const loaded = urlRules ?? initialPreset?.rules;
-    const rules = new RuleMatrix(loaded ? 0 : params.numTypes, Math.random, params.ruleGenerator);
+    const rules = new RuleMatrix(loaded ? 0 : params.numTypes, Math.random, params.ruleGenerator, params.ruleExponent);
     if (loaded) {
         rules.load(loaded);
         params.numTypes = rules.numTypes;
@@ -107,7 +107,7 @@ async function main() {
             sim.randomize(n, rules.numTypes);
         },
         setNumTypes(n) {
-            rules.resize(n, Math.random, params.ruleGenerator);
+            rules.resize(n, Math.random, params.ruleGenerator, params.ruleExponent);
             palette = createPalette(n);
             sim.setRules(rules);
             rulesDirty = false;
@@ -125,7 +125,7 @@ async function main() {
             matrix.rebuild(rules, palette);
         },
         randomizeRules() {
-            rules.randomize(Math.random, params.ruleGenerator);
+            rules.randomize(Math.random, params.ruleGenerator, params.ruleExponent);
             matrix.refresh();
             rulesEdited();
         },

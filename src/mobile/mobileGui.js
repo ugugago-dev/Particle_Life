@@ -19,6 +19,7 @@ export function createMobileGUI(params, actions) {
     gui.add(params, 'numParticles', 500, 20000, 500).onFinishChange(actions.setNumParticles);
     gui.add(params, 'numTypes', 1, 12, 1).onFinishChange(actions.setNumTypes);
     gui.add(params, 'ruleGenerator', RULE_GENERATORS).name('random rules');
+    gui.add(params, 'ruleExponent', 1, 6, 0.5).name('strength (^n)');
     gui.add(params, 'rMax', 0.02, 0.25, 0.0025);
     gui.add({ run: actions.recomputeRMax }, 'run').name('Recompute rMax');
     gui.add({ run: actions.resetParticles }, 'run').name('Reset particles');

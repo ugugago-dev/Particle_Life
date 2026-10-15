@@ -61,6 +61,31 @@ for (let n = 1; n <= 12; n++) {
     check(smallL / off > 2 * (smallU / off), `lifelike small entries ${smallL / off} vs uniform ${smallU / off}`);
 }
 
+// 2b. strong: 構造は lifelike と同じ (同じ seed で符号が同じ) で、絶対値が大きい。指数が大きいほど ±1 に寄る
+{
+    const n = 6;
+    const big = (m) => m.filter((v) => Math.abs(v) >= 0.7 - 1e-6).length / m.length;
+    let fL = 0, f2 = 0, f3 = 0, f6 = 0, signDiff = 0, cnt = 0;
+    for (let seed = 0; seed < 300; seed++) {
+        const L = lifelikeRules(n, makeRng(seed));
+        const S3 = generateRules('strong', n, makeRng(seed), 3);
+        fL += big(L);
+        f2 += big(generateRules('strong', n, makeRng(seed), 2));
+        f3 += big(S3);
+        f6 += big(generateRules('strong', n, makeRng(seed), 6));
+        check(S3.every((v) => v >= -1 && v <= 1 && Math.abs(v * 20 - Math.round(v * 20)) < 1e-4), `strong seed=${seed}: range / grid`);
+        for (let k = 0; k < L.length; k++) {
+            // 背景 (±0.1) 以外で符号が逆になる成分は無い (弱い向きの成分は強い端の符号になるので 0 をまたぐことはある)
+            if (Math.abs(L[k]) >= 0.3 && Math.abs(S3[k]) >= 0.3 && Math.sign(L[k]) !== Math.sign(S3[k])) signDiff++;
+            cnt++;
+        }
+    }
+    check(f3 / 300 > 0.4 && f3 > 2 * fL, `strong ^3 share of |v| >= 0.7: ${(f3 / 300).toFixed(2)} vs lifelike ${(fL / 300).toFixed(2)}`);
+    check(f2 < f3 && f3 < f6, `exponent order ${f2} ${f3} ${f6}`);
+    check(signDiff / cnt < 0.02, `strong flipped signs: ${signDiff}/${cnt}`);
+    check(generateRules('strong', 4, makeRng(5)).every((v, k) => v === generateRules('strong', 4, makeRng(5), 3)[k]), 'strong default exponent is 3');
+}
+
 // 3. generateRules: 未知の名前は lifelike
 check(generateRules('???', 4, makeRng(3)).every((v, k) => v === lifelikeRules(4, makeRng(3))[k]), 'unknown generator is not lifelike');
 

@@ -42,7 +42,11 @@ export function createGUI(params, actions, { advanced = false, preset = CUSTOM }
             gui.controllersRecursive().forEach((c) => c.updateDisplay()); // numTypes changed
         });
     gui.add({ run: actions.randomizeRules }, 'run').name('Randomize rules');
-    gui.add(params, 'ruleGenerator', RULE_GENERATORS).name('random rules');
+    const exponent = gui.add(params, 'ruleExponent', 1, 6, 0.5).name('strength (^n)');    // 'strong' only
+    gui.add(params, 'ruleGenerator', RULE_GENERATORS).name('random rules')
+        .onChange(() => exponent.show(params.ruleGenerator === 'strong'));
+    gui.$children.append(exponent.domElement); // below the select
+    exponent.show(params.ruleGenerator === 'strong');
     gui.add({ run: actions.resetParticles }, 'run').name('Reset particles');
     gui.add(params, 'running');
     // on release, so dragging does not rebuild every frame
